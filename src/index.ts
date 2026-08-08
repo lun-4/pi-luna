@@ -45,6 +45,10 @@ const PARTS_SPEC: Record<string, { description: string; file: string }> = {
     description: "Registers /exit command",
     file: join(__dirname, "parts", "exit.ts"),
   },
+  sandbox: {
+    description: "Runs agent bash commands inside a landstrip sandbox",
+    file: join(__dirname, "parts", "sandbox.ts"),
+  },
 };
 
 /** Toggle config lives in the user dir, not the repo. */

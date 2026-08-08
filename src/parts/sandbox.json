@@ -1,0 +1,26 @@
+{
+  "enabled": true,
+  "unsandboxedAllow": [],
+  "shell": { "readAccess": "host" },
+  "network": {
+    "allowNetwork": true,
+    "allowLocalBinding": true,
+    "allowAllUnixSockets": true,
+    "allowUnixSockets": [],
+    "allowedDomains": [],
+    "deniedDomains": []
+  },
+  "filesystem": {
+    "denyRead": [],
+    "allowRead": [".", "~/.gitconfig", "~/.config/git/config", "/dev/null"],
+    "allowWrite": [".", "/dev/null", "/tmp"],
+    "denyWrite": [
+      "**/.env",
+      "**/.env.*",
+      "**/*.pem",
+      "**/*.key",
+      ".pi/sandbox.json",
+      "~/.pi/agent/sandbox.json"
+    ]
+  }
+}
