@@ -1,0 +1,11 @@
+{
+  "name": "pi-luna",
+  "version": "0.1.0",
+  "description": "luna's global pi meta-extension",
+  "keywords": ["pi-package"],
+  "license": "UNLICENSED",
+  "type": "module",
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  }
+}
