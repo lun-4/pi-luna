@@ -61,7 +61,7 @@ describe("loadConfig", () => {
     const proj = join(root, "proj");
     mkdirSync(join(home, ".pi", "agent"), { recursive: true });
     mkdirSync(join(proj, ".pi"), { recursive: true });
-    writeFileSync(join(home, ".pi", "agent", "sandbox.json"), JSON.stringify({ unsandboxedAllow: ["ssh"] }));
+    writeFileSync(join(home, ".pi", "agent", "luna-sandbox.json"), JSON.stringify({ unsandboxedAllow: ["ssh"] }));
     // project file
     writeFileSync(join(proj, ".pi", "sandbox.json"), JSON.stringify({ unsandboxedAllow: ["make"] }));
     const loaded = loadConfig({ baseDir: join(here, "..", "src", "parts"), homeDir: home, cwd: proj, trusted: false });

@@ -10,11 +10,22 @@
  * Sandboxed runs are fire-and-forget: landstrip enforces a static policy and
  * writes terminal trap records as JSON lines on the child's stderr. We parse
  * those to detect "failed because of the sandbox" and surface the denied
- * paths to the agent. No broker socket, no suspended syscalls.
+ * paths to the agent. No broker socket, no suspended syscalls. (Verified
+ * empirically via scripts/landstrip-probe*.mjs: every denial landstrip
+ * causes — Landlock allow-miss or glob deny — emits a trap.)
+ *
+ * Filesystem posture (empirically derived): writes are allow-listed (cwd,
+ * /tmp, toolchain caches); reads deny the home roots (/home, /Users, /root)
+ * with targeted allowRead exceptions (project, git config, toolchain caches).
+ * NOTE: `allowRead` alone does NOT confine reads, and `denyRead: ["/"]`
+ * breaks the dynamic loader — denying the home roots is the viable posture.
+ * `~/.ssh` & co. stay denied.
  *
  * Config tiers (base < global < project < session), arrays concatenate,
  * objects merge, later scalars win. `unsandboxedAllow` is a pi-luna addition
- * and is stripped before the policy is handed to landstrip.
+ * and is stripped before the policy is handed to landstrip. The global tier
+ * is ~/.pi/agent/luna-sandbox.json — NOT ~/.pi/agent/sandbox.json, which
+ * belongs to pi-landstrip and carries incompatible network semantics.
  */
 
 import {
@@ -217,7 +228,8 @@ function readJsonIfExists(path: string): SandboxConfig | undefined {
 export function loadConfig(opts: LoadOpts): { config: SandboxConfig } {
   const home = opts.homeDir ?? homedir();
   const base = readJsonIfExists(join(opts.baseDir ?? __dirname, "sandbox.json"));
-  const global = readJsonIfExists(join(home, ".pi", "agent", "sandbox.json"));
+  // NOTE: deliberately NOT ~/.pi/agent/sandbox.json — pi-landstrip owns that.
+  const global = readJsonIfExists(join(home, ".pi", "agent", "luna-sandbox.json"));
   const project = opts.trusted
     ? readJsonIfExists(join(opts.cwd, ".pi", "sandbox.json"))
     : undefined;
@@ -383,10 +395,12 @@ export function makeSandboxTool(
     name: "bash",
     label: "bash",
     description:
-      "Execute a bash command. Commands run inside an OS sandbox (Landlock + seccomp) " +
-      "that confines the filesystem to the working directory (network is unrestricted). " +
-      "If a command fails due to a filesystem denial you'll be told which path was denied; " +
-      "retry that command with sandbox: false to request running it unsandboxed (subject to user approval).",
+      "Execute a bash command. Commands run inside an OS sandbox (Landlock + seccomp): " +
+      "writes are confined to the working directory and /tmp, and the user's home directory " +
+      "is unreadable except the working directory, git config, and toolchain caches (network " +
+      "is unrestricted). If a command fails due to a filesystem denial you'll be told which " +
+      "path was denied; retry that command with sandbox: false to request running it " +
+      "unsandboxed (subject to user approval).",
     promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
     promptGuidelines: [
       "You can inspect PI_* environment variables for current model and session details.",
@@ -494,7 +508,7 @@ export default function (pi: ExtensionAPI) {
     const path =
       which === "project"
         ? join(ctxRef?.cwd ?? process.cwd(), ".pi", "sandbox.json")
-        : join(homedir(), ".pi", "agent", "sandbox.json");
+        : join(homedir(), ".pi", "agent", "luna-sandbox.json");
     await mkdir(dirname(path), { recursive: true });
     let cfg: SandboxConfig = {};
     try { cfg = JSON.parse(await readFile(path, "utf8")); } catch {}

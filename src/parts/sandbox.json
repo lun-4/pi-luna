@@ -11,16 +11,42 @@
     "deniedDomains": []
   },
   "filesystem": {
-    "denyRead": [],
-    "allowRead": [".", "~/.gitconfig", "~/.config/git/config", "/dev/null"],
-    "allowWrite": [".", "/dev/null", "/tmp"],
+    "denyRead": ["/home", "/Users", "/root"],
+    "allowRead": [
+      ".",
+      "/tmp",
+      "/dev/null",
+      "~/.gitconfig",
+      "~/.config/git",
+      "~/.npm",
+      "~/.cache",
+      "~/.cargo",
+      "~/.rustup",
+      "~/go",
+      "~/.local/share/pnpm",
+      "~/.m2",
+      "~/.gradle"
+    ],
+    "allowWrite": [
+      ".",
+      "/dev/null",
+      "/tmp",
+      "~/.npm",
+      "~/.cache",
+      "~/.cargo",
+      "~/go",
+      "~/.local/share/pnpm",
+      "~/.m2",
+      "~/.gradle"
+    ],
     "denyWrite": [
       "**/.env",
       "**/.env.*",
       "**/*.pem",
       "**/*.key",
       ".pi/sandbox.json",
-      "~/.pi/agent/sandbox.json"
+      "~/.pi/agent/sandbox.json",
+      "~/.pi/agent/luna-sandbox.json"
     ]
   }
 }

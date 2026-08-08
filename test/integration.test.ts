@@ -9,31 +9,43 @@
  * Run `npx vitest run test/integration.test.ts` from a top-level shell to
  * exercise the sandboxed tests for real.
  */
-import { describe, it, expect, beforeAll } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { describe, it, expect } from "vitest";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { binaryPath } from "@landstrip/landstrip";
-import { makeSandboxTool, type SandboxUI } from "../src/parts/sandbox.js";
+import { makeSandboxTool, landstripPolicy, type SandboxUI } from "../src/parts/sandbox.js";
 
 const cwd = process.cwd();
 const home = mkdtempSync(join(tmpdir(), "luna-home-"));
+const here = dirname(fileURLToPath(import.meta.url));
 
-let available = false;
-beforeAll(() => {
+// Probe synchronously at module load: skipIf/runIf conditions are evaluated
+// at collection time, before any beforeAll hook runs.
+// Uses the *actual* bundled base policy and the exact production invocation —
+// anything less faithfully reproduces what execute() does.
+function probeSandbox(): { available: boolean; diag: string } {
   const dir = mkdtempSync(join(tmpdir(), "luna-probe-"));
   const pol = join(dir, "p.json");
-  writeFileSync(
-    pol,
-    JSON.stringify({
-      filesystem: { allowRead: ["."], allowWrite: ["."], denyRead: [], denyWrite: [] },
-      network: { allowNetwork: true, allowLocalBinding: true, allowAllUnixSockets: true, allowUnixSockets: [], allowedDomains: [], deniedDomains: [] },
-    }),
-  );
-  const r = spawnSync(binaryPath(), ["run", "-p", pol, "--", "/bin/true"], { encoding: "utf8" });
-  available = r.status === 0 && !r.stderr.includes("SANDBOX_SETUP_FAILED");
-});
+  const base = JSON.parse(readFileSync(join(here, "..", "src", "parts", "sandbox.json"), "utf8"));
+  writeFileSync(pol, JSON.stringify(landstripPolicy(base)));
+  const r = spawnSync(binaryPath(), ["run", "-p", pol, "--", "bash", "-c", "true"], {
+    encoding: "utf8",
+  });
+  return {
+    available: r.status === 0,
+    diag:
+      `status=${r.status} signal=${r.signal} error=${r.error} ` +
+      `stderr=${JSON.stringify(r.stderr?.slice(0, 2000))}`,
+  };
+}
+const probe = probeSandbox();
+const available = probe.available;
+if (!available) {
+  process.stderr.write(`[integration] sandbox probe failed: ${probe.diag}\n`);
+}
 
 function fakeUi(answer: string | undefined): SandboxUI & { calls: string[][] } {
   const calls: string[][] = [];
@@ -70,12 +82,29 @@ describe("sandboxed bash (default)", () => {
     expect((res.content[0] as { text: string }).text).not.toContain("Sandbox: this command was denied");
   });
 
-  it.skipIf(!available)("cat /etc/shadow is denied and the note names the path", async () => {
+  it.skipIf(!available)("writes outside allowed roots are denied and the note names the path", async () => {
     const ui = fakeUi(undefined);
     const tool = makeSandboxTool(cwd, { ui, ctx: makeCtx(ui), homeDir: home });
+    // $HOME is outside allowWrite (".", /tmp, caches) — guaranteed denial + trap.
     await expect(
-      tool.execute("t2", { command: "cat /etc/shadow" }, undefined, undefined, makeCtx(ui) as never),
-    ).rejects.toThrow(/Sandbox: this command was denied[\s\S]*\/etc\/shadow/);
+      tool.execute("t2", { command: 'echo x > "$HOME/luna-sbx-write-probe"' }, undefined, undefined, makeCtx(ui) as never),
+    ).rejects.toThrow(/Sandbox: this command was denied[\s\S]*luna-sbx-write-probe/);
+  });
+
+  it.skipIf(!available)("home reads are denied and the note names the path", async () => {
+    const ui = fakeUi(undefined);
+    const tool = makeSandboxTool(cwd, { ui, ctx: makeCtx(ui), homeDir: home });
+    // denyRead ["/home", ...] with cwd as the only home exception.
+    await expect(
+      tool.execute("t2b", { command: "ls ~" }, undefined, undefined, makeCtx(ui) as never),
+    ).rejects.toThrow(/Sandbox: this command was denied[\s\S]*home/);
+  });
+
+  it.skipIf(!available)("system paths stay readable under denyRead (loader works)", async () => {
+    const ui = fakeUi(undefined);
+    const tool = makeSandboxTool(cwd, { ui, ctx: makeCtx(ui), homeDir: home });
+    const res = await tool.execute("t2c", { command: "cat /etc/hostname" }, undefined, undefined, makeCtx(ui) as never);
+    expect((res.content[0] as { text: string }).text.trim().length).toBeGreaterThan(0);
   });
 
   // Inverse of the above: in a nested shell the trap path is exercised for
@@ -93,7 +122,7 @@ describe("sandboxed bash (default)", () => {
     const tool = makeSandboxTool(cwd, { ui, ctx: makeCtx(ui), homeDir: home });
     const res = await tool.execute(
       "t3",
-      { command: "curl -sI -m 10 https://example.com -o /dev/null -w '%{http_code}'" },
+      { command: "curl -sI -m 10 https://example.net -o /dev/null -w '%{http_code}'" },
       undefined, undefined, makeCtx(ui) as never,
     );
     expect((res.content[0] as { text: string }).text).toContain("200");

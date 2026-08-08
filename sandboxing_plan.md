@@ -450,3 +450,42 @@ Unit tests (our seams, not the kernel):
       `/usr/bin/git` → `git`; `sudo git` → `git`.
 
 Done = all green + `landstrip doctor` OK + the two manual smoke tests behave.
+
+---
+
+# Addendum: field corrections (empirically verified, 2026-08-08)
+
+Implemented and tested against landstrip 0.18.26 on luna's machine. The plan's
+mechanism survived contact; several policy-format assumptions did not. Source
+of truth: `scripts/landstrip-probe.mjs` / `scripts/landstrip-probe2.mjs` and
+`scripts/sandbox-smoke.mjs` (run top-level, never inside pi-landstrip).
+
+1. **`allowRead` alone does NOT confine reads.** This policy format (Anthropic
+   Sandbox Runtime subset) reads: "Reads are unrestricted until `denyRead` is
+   non-empty; `allowRead` then adds exceptions, most specific rule wins."
+2. **`denyRead: ["/"]` is unusable** — even `bash` fails to start
+   (`libc.so.6: Permission denied`); `shell.readAccess:"host"` does not
+   exempt the dynamic loader. The viable allow-list posture (also what
+   pi-landstrip itself ships): `denyRead: ["/home","/Users","/root"]` plus
+   `allowRead` exceptions for `.`, git config, and toolchain caches.
+3. **Toolchain caches need read AND write** (`~/.npm`, `~/.cache`, `~/.cargo`,
+   `~/go`, pnpm store, `~/.m2`, `~/.gradle`) or every package manager breaks.
+   They are in both lists in the bundled base policy. `~/.ssh`, `~/.gnupg`,
+   `~/.aws`, `~/.pi/agent/auth.json` stay denied — escalation via
+   `sandbox:false` covers `git push` over SSH etc.
+4. **Every landstrip-caused denial emits a `FILESYSTEM_DENIED` trap** on
+   stderr (Landlock allow-miss writes, deny-mode reads, and glob `denyWrite`
+   hits all verified). The plan's stderr-trap design works as written.
+5. **Glob `denyWrite` fires at access time** as advertised (`./.env`,
+   `./sub/.env`, `./cert.pem` all denied + traps inside allowed roots).
+6. **Global tier moved to `~/.pi/agent/luna-sandbox.json`.**
+   `~/.pi/agent/sandbox.json` is pi-landstrip's live config and carries
+   `allowNetwork:false` + domain rules that would silently kill networking
+   here (landstrip starts no proxy). Project tier stays `.pi/sandbox.json`
+   (trust-gated, same format, intentional sharing). `unsandboxedAllow` we
+   persist globally therefore lands in `luna-sandbox.json`.
+7. **`/etc/shadow` is a bad denial test target** — plain unix perms deny it
+   anyway, proving nothing. Tests use a `$HOME` write and `ls ~` instead.
+8. **vitest `skipIf`/`runIf` evaluate at collection time** — before
+   `beforeAll`. The sandbox-availability probe runs at module top level.
+9. `example.com` times out on luna's network; tests use `example.net`.
