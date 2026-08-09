@@ -27,8 +27,12 @@ function fakeUi(overrides: Partial<AskUI> = {}): AskUI & { calls: string[] } {
   } as AskUI & { calls: string[] };
 }
 
-function toolWith(ui: AskUI, hasUI = true) {
-  const tool = makeAskTool({ ui, hasUI: () => hasUI });
+function toolWith(ui: AskUI & { calls: string[] }, hasUI = true) {
+  const tool = makeAskTool({
+    ui,
+    hasUI: () => hasUI,
+    bell: () => ui.calls.push("bell"),
+  });
   const run = (questions: AskQuestion[]) =>
     tool.execute("id", { questions }, undefined, undefined, undefined);
   return { tool, run };
@@ -36,21 +40,25 @@ function toolWith(ui: AskUI, hasUI = true) {
 
 describe("ask tool", () => {
   it("throws with no UI (headless)", async () => {
-    const { run } = toolWith(fakeUi(), false);
+    const ui = fakeUi();
+    const { run } = toolWith(ui, false);
     await expect(run([{ id: "q1", text: "?" }])).rejects.toThrow(/no UI/);
+    expect(ui.calls).toEqual([]); // no prompt, no bell
   });
 
-  it("empty questions → empty result, not cancelled", async () => {
-    const { run } = toolWith(fakeUi());
+  it("empty questions → empty result, not cancelled (and no bell)", async () => {
+    const ui = fakeUi();
+    const { run } = toolWith(ui);
     const r = await run([]);
     expect(JSON.parse(r.content[0].text)).toEqual({ answers: [], cancelled: false });
+    expect(ui.calls).toEqual([]);
   });
 
-  it("tier 2: one question without options → input", async () => {
+  it("tier 2: one question without options → input (bell first)", async () => {
     const ui = fakeUi({ input: async () => "because reasons" });
     const { run } = toolWith(ui);
     const r = await run([{ id: "why", text: "Why?" }]);
-    expect(ui.calls).toEqual(["input:Why?"]);
+    expect(ui.calls).toEqual(["bell", "input:Why?"]);
     expect(JSON.parse(r.content[0].text)).toEqual({
       answers: [{ id: "why", selected: [], custom: "because reasons" }],
       cancelled: false,
@@ -61,7 +69,7 @@ describe("ask tool", () => {
     const ui = fakeUi({ select: async (_t, o) => o[1] });
     const { run } = toolWith(ui);
     const r = await run([{ id: "pick", text: "Pick one", options: ["A", "B", "C"] }]);
-    expect(ui.calls[0]).toBe("select:Pick one:A|B|C|✎ type your own answer");
+    expect(ui.calls).toEqual(["bell", "select:Pick one:A|B|C|✎ type your own answer"]);
     expect(JSON.parse(r.content[0].text)).toEqual({
       answers: [{ id: "pick", selected: ["B"], custom: "" }],
       cancelled: false,
@@ -75,7 +83,7 @@ describe("ask tool", () => {
     });
     const { run } = toolWith(ui);
     const r = await run([{ id: "pick", text: "Pick one", options: ["A", "B"] }]);
-    expect(ui.calls).toEqual(["select:Pick one:A|B|✎ type your own answer", "input:Pick one"]);
+    expect(ui.calls).toEqual(["bell", "select:Pick one:A|B|✎ type your own answer", "input:Pick one"]);
     expect(JSON.parse(r.content[0].text)).toEqual({
       answers: [{ id: "pick", selected: [], custom: "something else entirely" }],
       cancelled: false,
@@ -112,7 +120,7 @@ describe("ask tool", () => {
       { id: "a", text: "A?", options: ["X", "Y"] },
       { id: "b", text: "B?" },
     ]);
-    expect(ui.calls).toEqual(["custom"]);
+    expect(ui.calls).toEqual(["bell", "custom"]);
     expect(JSON.parse(r.content[0].text)).toEqual(answers);
   });
 
@@ -124,7 +132,7 @@ describe("ask tool", () => {
     const ui = fakeUi({ custom: (async () => answers) as AskUI["custom"] });
     const { run } = toolWith(ui);
     const r = await run([{ id: "m", text: "Multi?", options: ["A", "B", "C"], multi: true }]);
-    expect(ui.calls).toEqual(["custom"]);
+    expect(ui.calls).toEqual(["bell", "custom"]);
     expect(JSON.parse(r.content[0].text)).toEqual(answers);
   });
 
@@ -139,7 +147,7 @@ describe("ask tool", () => {
       { id: "a", text: "A?", options: ["X", "Y"] },
       { id: "b", text: "B?" },
     ]);
-    expect(ui.calls).toEqual(["select:A?:X|Y|✎ type your own answer", "input:B?"]);
+    expect(ui.calls).toEqual(["bell", "select:A?:X|Y|✎ type your own answer", "input:B?"]);
     expect(JSON.parse(r.content[0].text)).toEqual({
       answers: [
         { id: "a", selected: ["X"], custom: "" },

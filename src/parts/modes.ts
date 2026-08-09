@@ -189,14 +189,21 @@ export function decideReview(
  * to the transcript before this runs (printPlan), so the dialog stays small —
  * pick Accept/Talk, feedback via a plain input. Wheel-scrolls like any other
  * transcript output.
+ *
+ * Rings the terminal bell (bell()) right before the decision dialog blocks,
+ * so luna hears it when the agent submits — the dialog blocks mid-turn, so
+ * agent_settled never fires while it's up.
  */
 export async function runSubmitFlow(opts: {
   ui: ModeUI;
   planPath: string;
   readPlan: (p: string) => Promise<string | undefined>;
+  /** Ring the terminal bell (\a) to get luna's attention before the dialog. */
+  bell(): void;
 }): Promise<SubmitOutcome> {
   const content = await opts.readPlan(opts.planPath);
   if (!content || !content.trim()) return { kind: "missing" };
+  opts.bell();
   const choice = await opts.ui.select("Plan submitted", [ACCEPT, TALK]);
   return decideReview(
     content,
@@ -429,6 +436,7 @@ export default function (pi: ExtensionAPI) {
           ui: ctx.ui,
           planPath: state.planPath ?? "",
           readPlan: async () => content,
+          bell: () => process.stdout.write("\x07"),
         });
       }
       if (outcome.kind === "missing") {

@@ -160,14 +160,19 @@ describe("runSubmitFlow", () => {
     input: async () => feedback,
   });
 
+  type SubmitFlowOpts = Parameters<typeof runSubmitFlow>[0];
+  const bells: string[] = [];
+  const flow = (opts: Omit<SubmitFlowOpts, "bell">) =>
+    runSubmitFlow({ bell: () => bells.push("bell"), ...opts });
+
   it("missing/empty plan → missing", async () => {
-    expect(await runSubmitFlow({ ui: uiPicking(), planPath: join(dir, "nope.md"), readPlan })).toEqual(
+    expect(await flow({ ui: uiPicking(), planPath: join(dir, "nope.md"), readPlan })).toEqual(
       { kind: "missing" },
     );
   });
 
   it("accept → accept outcome with content and path", async () => {
-    const out = await runSubmitFlow({ ui: uiPicking("Accept"), planPath: file, readPlan });
+    const out = await flow({ ui: uiPicking("Accept"), planPath: file, readPlan });
     expect(out.kind).toBe("accept");
     if (out.kind === "accept") {
       expect(out.planPath).toBe(file);
@@ -176,7 +181,7 @@ describe("runSubmitFlow", () => {
   });
 
   it("talk with feedback → talk outcome", async () => {
-    const out = await runSubmitFlow({
+    const out = await flow({
       ui: uiPicking("Talk", "make it darker"),
       planPath: file,
       readPlan,
@@ -185,12 +190,12 @@ describe("runSubmitFlow", () => {
   });
 
   it("talk with empty feedback → cancelled", async () => {
-    const out = await runSubmitFlow({ ui: uiPicking("Talk", "   "), planPath: file, readPlan });
+    const out = await flow({ ui: uiPicking("Talk", "   "), planPath: file, readPlan });
     expect(out.kind).toBe("cancelled");
   });
 
   it("escape on the select → cancelled", async () => {
-    const out = await runSubmitFlow({ ui: uiPicking(undefined), planPath: file, readPlan });
+    const out = await flow({ ui: uiPicking(undefined), planPath: file, readPlan });
     expect(out.kind).toBe("cancelled");
   });
 
@@ -203,8 +208,33 @@ describe("runSubmitFlow", () => {
       },
       input: async () => undefined,
     };
-    await runSubmitFlow({ ui, planPath: file, readPlan });
+    await flow({ ui, planPath: file, readPlan });
     expect(seen[0]).toBe("Accept & start building");
+  });
+
+  it("rings the bell once, right before the accept/talk dialog", async () => {
+    const events: string[] = [];
+    const ui: ModeUI = {
+      select: async (_t, o) => {
+        events.push("select");
+        return o[0]; // Accept
+      },
+      input: async () => undefined,
+    };
+    const out = await runSubmitFlow({
+      bell: () => events.push("bell"),
+      ui,
+      planPath: file,
+      readPlan,
+    });
+    expect(events).toEqual(["bell", "select"]);
+    expect(out.kind).toBe("accept");
+  });
+
+  it("no bell when the plan is missing (no dialog shown)", async () => {
+    bells.length = 0;
+    await flow({ ui: uiPicking(), planPath: join(dir, "nope.md"), readPlan });
+    expect(bells).toEqual([]);
   });
 });
 

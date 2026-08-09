@@ -17,6 +17,10 @@
  *      plain select/input dialogs.
  *
  * The UI is behind a small seam (AskUI) so behavior is unit-testable headless.
+ *
+ * Rings the terminal bell once before showing the first prompt. Unlike plan_submit,
+ * which only seems to ring because its accepted turn ends (agent_settled → bell.ts),
+ * ask blocks mid-turn, so no settle fires — it has to ring for itself.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -81,6 +85,8 @@ export interface AskUI {
 export interface AskToolDeps {
   ui: AskUI;
   hasUI(): boolean;
+  /** Ring the terminal bell (\a) to get luna's attention before prompting. */
+  bell(): void;
 }
 
 const CUSTOM_OPTION = "✎ type your own answer";
@@ -379,6 +385,10 @@ export function makeAskTool(deps: AskToolDeps) {
       if (!params.questions.length) {
         return result([], false);
       }
+      // The dialogs below block until luna answers; get her attention first.
+      // One bell per ask call, not per question — the form and sequential flows
+      // are a single questioning event.
+      deps.bell();
       const needsForm = params.questions.length > 1 || params.questions.some((q) => q.multi);
       const r = needsForm
         ? await askForm(params.questions, deps.ui)
@@ -415,6 +425,7 @@ export default function (pi: ExtensionAPI) {
 
   const tool = makeAskTool({
     hasUI: () => ctxRef?.hasUI ?? false,
+    bell: () => process.stdout.write("\x07"),
     ui: {
       select: (t, o) => ctxRef!.ui.select(t, o),
       input: (t, p) => ctxRef!.ui.input(t, p),
