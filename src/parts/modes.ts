@@ -28,6 +28,9 @@
  * already sent its toolset, so the plan toolset applies from the next LLM
  * call. Mode state is in-memory per session (resets on session_start); plan
  * files persist on disk.
+ *
+ * State and the mode helpers live at module scope (getMode/subagentTypesFor
+ * are imported by subagents.ts; the factory captures `pi` into piRef).
  */
 
 import {
@@ -42,12 +45,18 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { Type, type Static } from "typebox";
+// Type-only: the runtime import of subagents.ts lives in subagents.ts itself
+// (it imports getMode/subagentTypesFor from here) — no runtime cycle.
+import type { SubagentType } from "./subagents.ts";
 
 // ---------------------------------------------------------------------------
 // Types & state
 // ---------------------------------------------------------------------------
 
 export type Mode = "build" | "plan";
+
+/** Set by the factory; module-scope helpers (applyMode) need it. */
+let piRef: ExtensionAPI = undefined as unknown as ExtensionAPI;
 
 export interface ModesState {
   mode: Mode;
@@ -59,6 +68,57 @@ export interface ModesState {
   planPath: string | undefined;
 }
 
+/**
+ * Module-scope mode state. The factory registers once per process; hoisting
+ * makes getMode()/subagentTypesFor() importable by other parts (subagents.ts
+ * gates subagent_create on the live mode). Session semantics are unchanged:
+ * session_start resets to build.
+ */
+const state: ModesState = {
+  mode: "build",
+  buildTools: [],
+  handoffPending: undefined,
+  planPath: undefined,
+};
+
+function updateStatus(ctx: ExtensionContext | undefined) {
+  if (!ctx?.hasUI) return;
+  ctx.ui.setStatus("mode", `mode: ${state.mode}`);
+}
+
+function applyMode(ctx: ExtensionContext) {
+  piRef.setActiveTools(toolListFor(state.mode, state.buildTools));
+  updateStatus(ctx);
+}
+
+function setMode(next: Mode, ctx: ExtensionContext) {
+  if (state.mode === next) return;
+  state.mode = next;
+  applyMode(ctx);
+  ctx.ui.notify(
+    next === "plan"
+      ? "Plan mode — read tools + plan file only. Shift+Tab or /build to exit."
+      : "Build mode — full toolset restored.",
+    "info",
+  );
+}
+
+/** The current mode (build | plan). Imported by other parts, e.g. the
+ *  subagents gate. */
+export function getMode(): Mode {
+  return state.mode;
+}
+
+/** Which subagent types a mode may spawn. Plan mode is read-only research. */
+export const SUBAGENT_TYPES_PER_MODE: Record<Mode, readonly SubagentType[]> = {
+  build: ["general-purpose", "explore"],
+  plan: ["explore"],
+};
+
+export function subagentTypesFor(mode: Mode): readonly SubagentType[] {
+  return SUBAGENT_TYPES_PER_MODE[mode];
+}
+
 export const PLAN_TOOLS = [
   "read",
   "grep",
@@ -68,6 +128,12 @@ export const PLAN_TOOLS = [
   "plan_submit",
   "write",
   "edit",
+  // subagent tools: create is gated to explore-only by the subagents part's
+  // own tool_call handler; send/get/delete are free in both modes.
+  "subagent_create",
+  "subagent_send",
+  "subagent_get",
+  "subagent_delete",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -229,34 +295,7 @@ const planSubmitSchema = Type.Object({
 export type PlanSubmitParams = Static<typeof planSubmitSchema>;
 
 export default function (pi: ExtensionAPI) {
-  const state: ModesState = {
-    mode: "build",
-    buildTools: [],
-    handoffPending: undefined,
-    planPath: undefined,
-  };
-
-  function updateStatus(ctx: ExtensionContext | undefined) {
-    if (!ctx?.hasUI) return;
-    ctx.ui.setStatus("mode", `mode: ${state.mode}`);
-  }
-
-  function applyMode(ctx: ExtensionContext) {
-    pi.setActiveTools(toolListFor(state.mode, state.buildTools));
-    updateStatus(ctx);
-  }
-
-  function setMode(next: Mode, ctx: ExtensionContext) {
-    if (state.mode === next) return;
-    state.mode = next;
-    applyMode(ctx);
-    ctx.ui.notify(
-      next === "plan"
-        ? "Plan mode — read tools + plan file only. Shift+Tab or /build to exit."
-        : "Build mode — full toolset restored.",
-      "info",
-    );
-  }
+  piRef = pi;
 
   pi.on("session_start", async (_e, ctx) => {
     state.mode = "build";
@@ -396,6 +435,7 @@ export default function (pi: ExtensionAPI) {
       "Develop the plan there using `write` and `edit` — no other file is writable, and there is no shell.",
       "Use `read` and the search tools freely, and `ask` when a decision forks the plan.",
       "A plan states the goal, ordered steps, files touched, risks, and open questions.",
+      "You may spawn `explore` subagents with `subagent_create` (read-only researchers) to investigate the codebase; collect their report with `subagent_get`.",
       "When it's complete, submit it with `plan_submit` (passing the file path); you may revise and resubmit until the user accepts.",
     ].join("\n");
     return { systemPrompt: event.systemPrompt + "\n" + directive };

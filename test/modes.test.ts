@@ -8,12 +8,15 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  PLAN_TOOLS,
   allowPlanWrite,
   buildAcceptKickoff,
   decideReview,
+  getMode,
   planModeGate,
   resolveTarget,
   runSubmitFlow,
+  subagentTypesFor,
   toolListFor,
   type ModeUI,
 } from "../src/parts/modes.js";
@@ -235,6 +238,55 @@ describe("runSubmitFlow", () => {
     bells.length = 0;
     await flow({ ui: uiPicking(), planPath: join(dir, "nope.md"), readPlan });
     expect(bells).toEqual([]);
+  });
+});
+
+describe("subagent modes integration", () => {
+  it("PLAN_TOOLS includes the four subagent tools", () => {
+    for (const t of ["subagent_create", "subagent_send", "subagent_get", "subagent_delete"]) {
+      expect(PLAN_TOOLS).toContain(t);
+    }
+  });
+
+  it("planModeGate passes subagent tools in plan mode, still blocks bash/writes", () => {
+    for (const t of ["subagent_create", "subagent_send", "subagent_get", "subagent_delete"]) {
+      expect(planModeGate(planState, t, {}, cwd)).toEqual({ block: false });
+    }
+    expect(planModeGate(planState, "bash", { command: "ls" }, cwd).block).toBe(true);
+    expect(planModeGate(planState, "write", { path: "src/x.ts" }, cwd).block).toBe(true);
+  });
+
+  it("toolListFor includes subagent tools in both modes", () => {
+    const buildTools = [
+      "read",
+      "grep",
+      "find",
+      "ls",
+      "bash",
+      "write",
+      "edit",
+      "ask",
+      "plan_submit",
+      "subagent_create",
+      "subagent_send",
+      "subagent_get",
+      "subagent_delete",
+    ];
+    const plan = toolListFor("plan", buildTools);
+    for (const t of ["subagent_create", "subagent_send", "subagent_get", "subagent_delete"]) {
+      expect(plan).toContain(t);
+    }
+    const build = toolListFor("build", buildTools);
+    for (const t of ["subagent_create", "subagent_send", "subagent_get", "subagent_delete"]) {
+      expect(build).toContain(t);
+    }
+    expect(build).not.toContain("plan_submit");
+  });
+
+  it("mode state starts build; plan mode spawns explore only", () => {
+    expect(getMode()).toBe("build");
+    expect(subagentTypesFor("plan")).toEqual(["explore"]);
+    expect(subagentTypesFor("build")).toEqual(["general-purpose", "explore"]);
   });
 });
 

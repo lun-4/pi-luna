@@ -57,6 +57,10 @@ const PARTS_SPEC: Record<string, { description: string; file: string }> = {
     description: "Build/Plan mode switching (shift+tab)",
     file: join(__dirname, "parts", "modes.ts"),
   },
+  subagents: {
+    description: "Process-backed subagents (subagent_create + /agents)",
+    file: join(__dirname, "parts", "subagents.ts"),
+  },
 };
 
 /** Toggle config lives in the user dir, not the repo. */

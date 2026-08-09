@@ -12,5 +12,7 @@ list of things to do
 - [x] sandboxing policy that fits CC's automode
 - [x] make ask prompts emit terminal bell (plan mode?)
 - [ ] add RunLua for multitooling? (parallel tooling, filtering tooling, anything the agent might want for token and request efficiency)
-- [ ] subagents (general purpose and explore subagent for better planning)
+- [x] subagents (general purpose and explore subagent for better planning)
+- [x] subagent UI fix: footer shouldnt have newlines on the msg
+- [ ] subagent UI /agents: the UI is very broken, impossible to actually have pi ui
 - [ ] real llm automode?

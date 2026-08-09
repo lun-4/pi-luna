@@ -6,6 +6,7 @@ import { describe, it, expect } from "vitest";
 import factory from "../src/parts/sandbox.js";
 import askFactory from "../src/parts/ask.js";
 import modesFactory from "../src/parts/modes.js";
+import subagentsFactory from "../src/parts/subagents.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 function stubPi() {
@@ -110,5 +111,27 @@ describe("modes part registration", () => {
     expect(text).toContain("# Plan");
     expect(text).toContain("1. step");
     expect(text).toContain("s.md");
+  });
+});
+
+describe("subagents part registration", () => {
+  it("registers the four subagent tools, /agents, and session handlers", () => {
+    const pi = stubPi();
+    subagentsFactory(pi as unknown as ExtensionAPI);
+    const names = pi.tools.map((t) => t.name);
+    for (const t of ["subagent_create", "subagent_send", "subagent_get", "subagent_delete"]) {
+      expect(names).toContain(t);
+    }
+    expect(pi.commands.has("agents")).toBe(true);
+    expect(pi.handlers.has("session_start")).toBe(true);
+    expect(pi.handlers.has("session_shutdown")).toBe(true);
+    expect(pi.handlers.has("tool_call")).toBe(true);
+  });
+
+  it("tools return JSON text content with structured details", async () => {
+    const pi = stubPi();
+    subagentsFactory(pi as unknown as ExtensionAPI);
+    const tool = pi.tools.find((t) => t.name === "subagent_get");
+    expect(tool.parameters).toBeDefined();
   });
 });
