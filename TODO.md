@@ -11,6 +11,7 @@ things i want from polytoken
 list of things to do
 - [x] sandboxing policy that fits CC's automode
 - [x] make ask prompts emit terminal bell (plan mode?)
+- [x] ring terminal bell on sandbox:false approval prompts (sandbox part)
 - [ ] add RunLua for multitooling? (parallel tooling, filtering tooling, anything the agent might want for token and request efficiency)
 - [x] subagents (general purpose and explore subagent for better planning)
 - [x] subagent UI fix: footer shouldnt have newlines on the msg

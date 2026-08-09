@@ -27,6 +27,14 @@
  * State is in-memory and session-scoped: workers are killed and the registry
  * cleared on session_shutdown and reset on session_start. Session files
  * persist under <agentDir>/sessions/<cwd>--/subagents/<handle>/.
+ *
+ * Per-type model config: the `subagents` key of
+ * ~/.pi/agent/extensions/luna.json is read live at every spawn (see
+ * subagent_architecture.md). A null entry inherits the primary's
+ * provider/modelId + thinking; an object entry overrides model and/or
+ * thinking per field — e.g. explore can run on a cheap model while the
+ * primary stays on its own. Model changes need no /reload (unlike the
+ * `extensions` toggles in the same file, which stay load-time).
  */
 
 import {
@@ -72,9 +80,45 @@ export const EXPLORE_TOOLS = ["read", "grep", "find", "ls"] as const;
 
 export const MAX_SUBAGENTS = 8;
 
+// ---------------------------------------------------------------------------
+// Per-type model config — `subagents` key of ~/.pi/agent/extensions/luna.json
+// ---------------------------------------------------------------------------
+
+/** Canonical thinking-level scale, the same 7 levels as effort.ts. */
+export type ThinkingLevel =
+  | "off"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+
+export const THINKING_LEVELS: readonly ThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+/** Per-type override — a null field inherits that field from the primary. */
+export interface SubagentModelEntry {
+  model: string | null;
+  thinking: ThinkingLevel | null;
+}
+
+/** The `subagents` key of luna.json. A null entry inherits both. */
+export type SubagentConfig = Partial<Record<SubagentType, SubagentModelEntry | null>>;
+
 export interface SubagentRecord {
   handle: string; // "sa-" + 8 hex chars
   type: SubagentType;
+  /** Resolved worker model ("provider/modelId"): inherited from the primary
+   *  or from the `subagents` config entry. */
+  model: string;
   status: SubagentStatus;
   rpc: RpcProcess;
   /** Streaming text of the in-flight assistant message ("" when idle). */
@@ -137,6 +181,141 @@ export const TYPE_PROMPTS: Record<SubagentType, string> = {
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested directly)
 // ---------------------------------------------------------------------------
+
+/**
+ * Read the `subagents` key of ~/.pi/agent/extensions/luna.json (live at every
+ * spawn — no caching, no /reload). Uses getAgentDir(), which respects
+ * PI_CODING_AGENT_DIR, unlike index.ts's hardcoded homedir. Returns {} on a
+ * missing/unparseable file; malformed entries are dropped by
+ * parseSubagentConfig with a warning — a bad config never breaks spawning.
+ */
+export function loadSubagentConfig(): SubagentConfig {
+  const path = join(getAgentDir(), "extensions", "luna.json");
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return {};
+  }
+  return parseSubagentConfig(raw);
+}
+
+/**
+ * Validate the raw `subagents` JSON. Structurally malformed input (unknown
+ * type keys, non-object roots/entries, wrong field types) is console.warned
+ * and dropped, never thrown — a bad config must not break spawns. Field
+ * *values* that are type-correct but semantically invalid (model without
+ * "provider/modelId", unknown thinking level) pass through; resolveSubagentModel
+ * rejects those loudly at spawn.
+ */
+export function parseSubagentConfig(raw: unknown): SubagentConfig {
+  if (!isRecord(raw)) return {};
+  if (raw.subagents === undefined) return {};
+  if (!isRecord(raw.subagents)) {
+    console.warn(
+      `[luna] subagents config: "subagents" must be an object, got ${typeof raw.subagents} — ignoring`,
+    );
+    return {};
+  }
+  const cfg: SubagentConfig = {};
+  for (const [key, value] of Object.entries(raw.subagents)) {
+    if (key !== "explore" && key !== "general-purpose") {
+      console.warn(
+        `[luna] subagents config: unknown subagent type "${key}" (expected "explore" or "general-purpose") — ignoring`,
+      );
+      continue;
+    }
+    if (value === null || value === undefined) {
+      cfg[key] = null; // explicit inherit (self-documenting default)
+      continue;
+    }
+    if (!isRecord(value)) {
+      console.warn(
+        `[luna] subagents config: entry for "${key}" must be null or an object, got ${
+          Array.isArray(value) ? "array" : typeof value
+        } — ignoring`,
+      );
+      continue;
+    }
+    const entry: SubagentModelEntry = { model: null, thinking: null };
+    let malformed = false;
+    if (value.model !== undefined) {
+      if (value.model === null) entry.model = null;
+      else if (typeof value.model === "string") entry.model = value.model;
+      else {
+        console.warn(
+          `[luna] subagents config: "${key}" model must be a string or null, got ${typeof value.model} — ignoring entry`,
+        );
+        malformed = true;
+      }
+    }
+    if (value.thinking !== undefined) {
+      if (value.thinking === null) entry.thinking = null;
+      else if (typeof value.thinking === "string") {
+        entry.thinking = value.thinking as ThinkingLevel; // membership validated at resolve
+      } else {
+        console.warn(
+          `[luna] subagents config: "${key}" thinking must be a string or null, got ${typeof value.thinking} — ignoring entry`,
+        );
+        malformed = true;
+      }
+    }
+    if (malformed) continue; // entry dropped → inherits
+    cfg[key] = entry;
+  }
+  return cfg;
+}
+
+/**
+ * Resolve the model + thinking a subagent of `type` spawns with.
+ *
+ * Entry semantics: an absent/null entry inherits both; an object entry
+ * overrides per field (a null field inherits that field). A config-sourced
+ * model spawns even when the primary has no active model; the model must
+ * still be inherited when no config model is set, so that case throws.
+ * Invalid config values (model without "provider/modelId", unknown thinking
+ * level) throw with the reason and valid choices — never silently inherit.
+ */
+export function resolveSubagentModel(
+  type: SubagentType,
+  cfg: SubagentConfig,
+  primary: { provider: string; id: string; thinking: string } | undefined,
+): { model: string; thinking: string; source: "inherit" | "config" } {
+  const entry = cfg[type] ?? null;
+
+  if (entry && entry.model !== null) {
+    const slash = entry.model.indexOf("/");
+    if (slash <= 0 || slash === entry.model.length - 1) {
+      throw new Error(
+        `subagents config: model "${entry.model}" for ${type} has no "provider/modelId" shape — ` +
+          `expected e.g. "openrouter/deepseek/deepseek-v4-flash-0731"`,
+      );
+    }
+  }
+  if (entry && entry.thinking !== null) {
+    if (!THINKING_LEVELS.includes(entry.thinking)) {
+      throw new Error(
+        `subagents config: thinking "${entry.thinking}" for ${type} is invalid — ` +
+          `valid levels: ${THINKING_LEVELS.join(", ")}`,
+      );
+    }
+  }
+
+  const inheritModel = entry === null || entry.model === null;
+  const inheritThinking = entry === null || entry.thinking === null;
+  if (inheritModel && !primary) {
+    throw new Error("No model available for subagent");
+  }
+
+  const model = inheritModel ? `${primary!.provider}/${primary!.id}` : entry!.model!;
+  // No primary + model from config: inherited thinking falls back to off.
+  const thinking = inheritThinking ? (primary?.thinking ?? "off") : entry!.thinking!;
+  const source =
+    entry !== null && (entry.model !== null || entry.thinking !== null)
+      ? "config"
+      : "inherit";
+  return { model, thinking, source };
+}
 
 /** The worker toolset for a subagent type. explore is fixed; general-purpose
  *  mirrors the root build toolset minus subagent/ask/plan_submit tools. */
@@ -817,9 +996,35 @@ export default function (pi: ExtensionAPI) {
     if (records.size >= MAX_SUBAGENTS) {
       throw new Error(`subagent cap reached (${MAX_SUBAGENTS}) — delete one first`);
     }
-    if (!ctx.model) throw new Error("No model available for subagent");
-    const model = `${ctx.model.provider}/${ctx.model.id}`;
-    const thinking = ctx.thinkingLevel ?? pi.getThinkingLevel();
+    // Per-type model config, read live at spawn (no /reload). A null entry
+    // inherits the primary's provider/modelId + thinking; an object entry
+    // overrides per field. A config-sourced model spawns even when the
+    // primary has no active model — resolveSubagentModel only throws when the
+    // model must be inherited from a missing primary.
+    const cfg = loadSubagentConfig();
+    const primary = ctx.model
+      ? {
+          provider: ctx.model.provider,
+          id: ctx.model.id,
+          thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(),
+        }
+      : undefined;
+    // Config-sourced models are checked against the model registry up-front:
+    // a typo'd/unknown id fails here with a clear message instead of a dead
+    // worker (markError would only surface "rpc exited"). resolveSubagentModel
+    // already rejected models without a valid "provider/modelId" shape.
+    const resolved = resolveSubagentModel(type, cfg, primary);
+    const entry = cfg[type];
+    if (entry && entry.model !== null) {
+      const slash = entry.model.indexOf("/");
+      if (!ctx.modelRegistry.find(entry.model.slice(0, slash), entry.model.slice(slash + 1))) {
+        throw new Error(
+          `model "${entry.model}" for ${type} is not in the model registry — add it to ~/.pi/agent/models.json`,
+        );
+      }
+    }
+    const model = resolved.model;
+    const thinking = resolved.thinking;
     const trusted = ctx.isProjectTrusted();
 
     const handle = "sa-" + randomUUID().slice(0, 8);
@@ -860,6 +1065,7 @@ export default function (pi: ExtensionAPI) {
     const record: SubagentRecord = {
       handle,
       type,
+      model,
       status: "spawning",
       rpc,
       currentText: "",
@@ -948,6 +1154,7 @@ export default function (pi: ExtensionAPI) {
       return toolResult({
         handle: record.handle,
         subagent_type: record.type,
+        model: record.model,
         status: record.status,
         note: "async: its final report will be queued to you automatically when it settles; subagent_delete frees it",
       });

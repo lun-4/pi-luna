@@ -291,11 +291,13 @@ export async function openAgentsOverlay(
             leftRows.push(" ".repeat(leftWidth));
             continue;
           }
+          const modelText = record.model ? ` ${record.model}` : "";
           const preview = previewText(
             sanitizeStatusText(record.lastMessage || record.currentText || "…"),
-            Math.max(0, leftWidth - 16), // guard: previewText slices are unicode-safe, negative would drop tail chars
+            // guard: previewText slices are unicode-safe, negative would drop tail chars
+            Math.max(0, leftWidth - 16 - modelText.length),
           );
-          const row = `${STATUS_GLYPHS[record.status]} ${record.type} ${record.handle} ${preview}`
+          const row = `${STATUS_GLYPHS[record.status]} ${record.type} ${record.handle}${modelText} ${preview}`
             .slice(0, leftWidth)
             .padEnd(leftWidth, " ");
           leftRows.push(i === state.cursor ? th.bg("selectedBg", th.fg("text", row)) : th.fg("dim", row));

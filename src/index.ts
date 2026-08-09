@@ -50,7 +50,8 @@ const PARTS_SPEC: Record<string, { description: string; file: string }> = {
     file: join(__dirname, "parts", "exit.ts"),
   },
   sandbox: {
-    description: "Runs agent bash commands inside a landstrip sandbox",
+    description:
+      "Runs agent bash commands inside a landstrip sandbox; rings the terminal bell when an unsandboxed run needs approval",
     file: join(__dirname, "parts", "sandbox.ts"),
   },
   modes: {

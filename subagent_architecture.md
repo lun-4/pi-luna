@@ -64,11 +64,66 @@ subagent and an `/agents` split-pane overlay.
   exports-only pi package has no "require" condition) — the resolved
   `@earendil-works/pi-coding-agent` `bin`. Clear error otherwise.
 
+## Configurable subagent models
+
+Each subagent type can run on its own model + thinking level via the
+`subagents` key of `~/.pi/agent/extensions/luna.json`:
+
+```json
+{
+  "extensions": { "...existing toggles...": true },
+  "subagents": {
+    "explore": null,
+    "general-purpose": {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "thinking": "off"
+    }
+  }
+}
+```
+
+- An entry of `null` (the default, self-documenting in the file) inherits
+  **both** the primary's `provider/modelId` and thinking level.
+- An object entry overrides **per field**; a `null`/omitted field inherits
+  that field. `{ "model": null, "thinking": "off" }` inherits the model but
+  forces thinking off. Use case: `explore` runs on a cheap OpenRouter model
+  while the primary stays on its own. `model` must be the exact
+  `provider/modelId` pi knows (the string the primary's footer shows) and
+  must contain a `/`. `thinking` is one of
+  `off | minimal | low | medium | high | xhigh | max`.
+- **Live-read**: `subagents.ts` reads the file at every `subagent_create` —
+  edit `luna.json` and the next spawn picks it up, no `/reload`. The
+  `extensions` toggles in the same file stay load-time (index.ts reads them
+  once at startup); that split is intentional — toggling a part needs a
+  reload, swapping a subagent model should not.
+- **Two readers of luna.json**: `src/index.ts` (the `extensions` toggles,
+  load-time) and `src/parts/subagents.ts` (the `subagents` models, spawn-time,
+  via `getAgentDir()`, which respects `PI_CODING_AGENT_DIR`).
+- **Validation**: structurally malformed input (unknown type keys,
+  non-object entries, wrong field types) is warned about and dropped by
+  `parseSubagentConfig` — those entries fall back to inherit and never break
+  spawning. A model without a `provider/modelId` shape or an unknown thinking
+  level throws at spawn with the reason and valid choices. Config-sourced
+  models are checked against the model registry up-front
+  (`ctx.modelRegistry.find(provider, id)` on the part before the first `/`);
+  an unknown id fails with `model "…" for explore is not in the model
+  registry — add it to ~/.pi/agent/models.json` instead of surfacing as a dead
+  worker (`markError` would only show "rpc exited").
+- **Where models must be registered**: `~/.pi/agent/models.json` (pi loads it
+  at `~/.pi/agent/models.json`; workers run `--no-extensions` but still load
+  it, so a registered model resolves there the same as for the primary).
+  OpenRouter models additionally need the provider registered + an API key
+  (`/login` or `OPENROUTER_API_KEY`); missing auth surfaces through the
+  worker's error path at the first LLM call.
+- **No primary model**: with a config model override a subagent can spawn
+  even when the primary has no active model (today it throws unconditionally).
+  Only the inherit path requires the primary's model.
+
 ## Verification
 
 - Unit: `npm test` (vitest) — protocol client against a fake `node -e` worker,
-  pure helpers (toolsets, spawn argv, transcripts, report caching), plan-mode
-  gate matrices, registration.
+  pure helpers (toolsets, spawn argv, transcripts, report caching,
+  `subagents` config parse/resolve), plan-mode gate matrices, registration.
 - Worker E2E: `node scripts/subagent-smoke.mjs` — real worker, prompt →
   `agent_settled` → `get_last_assistant_text`, follow_up queue-drain, clean
   stop (manual; needs API keys).

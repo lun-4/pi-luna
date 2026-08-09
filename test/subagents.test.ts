@@ -2,7 +2,7 @@
  * subagents part: pure helpers (toolsets, spawn argv, transcripts, report
  * caching) and the plan-mode type gate. Runs anywhere (no workers spawned).
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   applyDelta,
   buildReportNotification,
@@ -15,15 +15,19 @@ import {
   mergeMessageUsage,
   messagesToTranscript,
   parseHandle,
+  parseSubagentConfig,
   previewText,
   renderTranscript,
+  resolveSubagentModel,
   sanitizeStatusText,
   spawnArgs,
   subagentPreview,
   subagentToolsFor,
   usageSuffix,
   windowTranscript,
+  type SubagentConfig,
   type SubagentRecord,
+  type ThinkingLevel,
   type TranscriptMessage,
 } from "../src/parts/subagents.js";
 import {
@@ -133,6 +137,177 @@ describe("spawnArgs", () => {
     const args = spawnArgs({ ...base, trusted: false });
     expect(args[args.length - 3]).toBe("--no-approve");
     expect(spawnArgs({ ...base, trusted: true })).toContain("--approve");
+  });
+});
+
+describe("parseSubagentConfig", () => {
+  it("extracts the subagents key (null entries + object overrides)", () => {
+    const cfg = parseSubagentConfig({
+      extensions: { bell: true },
+      subagents: {
+        explore: null,
+        "general-purpose": {
+          model: "openrouter/deepseek/deepseek-v4-flash-0731",
+          thinking: "off",
+        },
+      },
+    });
+    expect(cfg).toEqual({
+      explore: null,
+      "general-purpose": {
+        model: "openrouter/deepseek/deepseek-v4-flash-0731",
+        thinking: "off",
+      },
+    });
+  });
+
+  it("returns {} for non-object roots and a missing subagents key", () => {
+    expect(parseSubagentConfig(null)).toEqual({});
+    expect(parseSubagentConfig("nope")).toEqual({});
+    expect(parseSubagentConfig(42)).toEqual({});
+    expect(parseSubagentConfig([])).toEqual({});
+    expect(parseSubagentConfig(undefined)).toEqual({});
+    expect(parseSubagentConfig({ extensions: { bell: true } })).toEqual({});
+  });
+
+  it("null entries pass through as explicit inherit", () => {
+    expect(
+      parseSubagentConfig({ subagents: { explore: null, "general-purpose": null } }),
+    ).toEqual({ explore: null, "general-purpose": null });
+  });
+
+  it("drops unknown type keys, non-object entries, and bad field types with a warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cfg = parseSubagentConfig({
+      subagents: {
+        scout: null, // unknown type key
+        bell: { model: "openrouter/x" }, // unknown type key
+        explore: "deepseek", // entry must be null or an object
+        "general-purpose": { model: 42 }, // wrong field type
+      },
+    });
+    expect(cfg).toEqual({});
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("keeps valid entries while dropping malformed siblings", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cfg = parseSubagentConfig({
+      subagents: {
+        explore: { model: "openrouter/deepseek/deepseek-v4-flash-0731", thinking: "off" },
+        "general-purpose": ["not", "an", "object"],
+      },
+    });
+    expect(cfg).toEqual({
+      explore: { model: "openrouter/deepseek/deepseek-v4-flash-0731", thinking: "off" },
+    });
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("warns and returns {} when subagents is not an object", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parseSubagentConfig({ subagents: "nope" })).toEqual({});
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+describe("resolveSubagentModel", () => {
+  const PRIMARY = {
+    provider: "openrouter",
+    id: "deepseek/deepseek-v4-flash-0731",
+    thinking: "xhigh",
+  };
+
+  it("null entry inherits the primary model and thinking", () => {
+    expect(
+      resolveSubagentModel("explore", { explore: null, "general-purpose": null }, PRIMARY),
+    ).toEqual({
+      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      thinking: "xhigh",
+      source: "inherit",
+    });
+  });
+
+  it("entry absent from config inherits too", () => {
+    expect(resolveSubagentModel("explore", {}, PRIMARY)).toEqual({
+      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      thinking: "xhigh",
+      source: "inherit",
+    });
+  });
+
+  it("object override uses the config model and thinking", () => {
+    const cfg: SubagentConfig = {
+      explore: { model: "openrouter/deepseek/deepseek-v4-flash-0731", thinking: "off" },
+    };
+    expect(resolveSubagentModel("explore", cfg, PRIMARY)).toEqual({
+      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      thinking: "off",
+      source: "config",
+    });
+  });
+
+  it('{ model: null, thinking: "off" } inherits the model but overrides thinking', () => {
+    const cfg: SubagentConfig = { explore: { model: null, thinking: "off" } };
+    expect(resolveSubagentModel("explore", cfg, PRIMARY)).toEqual({
+      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      thinking: "off",
+      source: "config",
+    });
+  });
+
+  it("overrides only the model, inheriting thinking", () => {
+    const cfg: SubagentConfig = {
+      explore: { model: "openrouter/deepseek/deepseek-v4-flash-0731", thinking: null },
+    };
+    expect(resolveSubagentModel("explore", cfg, PRIMARY)).toEqual({
+      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      thinking: "xhigh",
+      source: "config",
+    });
+  });
+
+  it("types resolve independently (other type's entry ignored)", () => {
+    const cfg: SubagentConfig = {
+      explore: { model: "openrouter/a/b", thinking: "low" },
+      "general-purpose": null,
+    };
+    expect(resolveSubagentModel("general-purpose", cfg, PRIMARY)).toEqual({
+      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      thinking: "xhigh",
+      source: "inherit",
+    });
+  });
+
+  it("throws for a model without a provider/modelId shape", () => {
+    expect(() =>
+      resolveSubagentModel("explore", { explore: { model: "deepseek", thinking: null } }, PRIMARY),
+    ).toThrow(/provider\/modelId/);
+  });
+
+  it("throws for an invalid thinking level with the valid choices", () => {
+    expect(() =>
+      resolveSubagentModel(
+        "explore",
+        { explore: { model: null, thinking: "huge" as ThinkingLevel } },
+        PRIMARY,
+      ),
+    ).toThrow(/huge.*valid levels: off, minimal, low, medium, high, xhigh, max/);
+  });
+
+  it("throws when the model must be inherited but the primary has none", () => {
+    expect(() => resolveSubagentModel("explore", { explore: null }, undefined)).toThrow(
+      /No model available for subagent/,
+    );
+  });
+
+  it("spawns from config alone when the primary has no model", () => {
+    expect(
+      resolveSubagentModel("explore", { explore: { model: "openrouter/a/b", thinking: "off" } }, undefined),
+    ).toEqual({ model: "openrouter/a/b", thinking: "off", source: "config" });
   });
 });
 

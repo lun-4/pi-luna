@@ -38,6 +38,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { binaryPath } from "@landstrip/landstrip";
+import { ringBell } from "./bell.ts";
 import { spawn, execFile } from "node:child_process";
 import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -361,6 +362,12 @@ export interface SandboxToolDeps {
   persistGlobal?: (argv0: string) => Promise<void>;
   /** Test seam: override where the global tier is read from. */
   homeDir?: string;
+  /**
+   * Ring the terminal bell (\a) to get luna's attention before the approval
+   * dialog blocks. Optional so minimal test constructions keep compiling;
+   * production always provides it. Tests that assert use a spy.
+   */
+  bell?(): void;
 }
 
 export function makeSandboxTool(
@@ -452,6 +459,9 @@ export function makeSandboxTool(
         ...(deps.ctx.isProjectTrusted() ? [`always allow ${argv0} for this project`] : []),
         `always allow ${argv0} globally`,
       ];
+      // The dialog below blocks mid-turn — agent_settled won't fire while it's
+      // up, so the gate rings for itself (same pattern as ask/plan_submit).
+      deps.bell?.();
       const choice = await ctx.ui.select(params.command, options);
       if (!choice || choice === "deny") {
         throw new Error(`Unsandboxed run of '${argv0}' denied by user.`);
@@ -543,6 +553,7 @@ export default function (pi: ExtensionAPI) {
       sessionAllow,
       persistProject: persist("project"),
       persistGlobal: persist("global"),
+      bell: ringBell,
     }) as never,
   );
 

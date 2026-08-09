@@ -200,7 +200,9 @@ runRaw(): spawn via createLocalBashOperations()  // identical kill/timeout/shell
 
 ### 6. UI surface
 
-- The unsandboxed-approval menu (only interactive element).
+- The unsandboxed-approval menu (only interactive element) — **rings the
+  terminal bell once** as it appears (blocking dialog mid-turn, so
+  agent_settled never fires; same pattern as ask/plan_submit).
 - `/sandbox` command (read-only): active?, `binaryPath()`, `landstrip doctor`
   output, effective merged landstrip policy, and the effective
   `unsandboxedAllow` list split by tier.

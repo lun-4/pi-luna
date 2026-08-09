@@ -139,6 +139,63 @@ describe("sandbox:false gate", () => {
     expect(ui.calls).toHaveLength(1);
   });
 
+  it("unlisted program rings one bell right before the approval menu", async () => {
+    const ui = fakeUi("deny");
+    const events: string[] = [];
+    const gatedUi = {
+      ...ui,
+      async select(title: string, options: string[]) {
+        events.push("select");
+        return ui.select(title, options);
+      },
+    };
+    const tool = makeSandboxTool(cwd, {
+      ui: gatedUi,
+      ctx: makeCtx(gatedUi),
+      homeDir: home,
+      bell: () => events.push("bell"),
+    });
+    await expect(
+      tool.execute("t4b", { command: "zzz-not-allowed echo hi", sandbox: false }, undefined, undefined, makeCtx(gatedUi) as never),
+    ).rejects.toThrow(/denied/i);
+    // Single bell, fired right before the prompt (mirrors modes.test.ts).
+    expect(events).toEqual(["bell", "select"]);
+    expect(ui.calls).toHaveLength(1);
+  });
+
+  it("no bell for a pre-listed program (sessionAllow) — no prompt to announce", async () => {
+    const ui = fakeUi(undefined);
+    const events: string[] = [];
+    const tool = makeSandboxTool(cwd, {
+      ui,
+      ctx: makeCtx(ui),
+      homeDir: home,
+      sessionAllow: new Set(["git"]),
+      bell: () => events.push("bell"),
+    });
+    const res = await tool.execute("t9b", { command: "git --version", sandbox: false }, undefined, undefined, makeCtx(ui) as never);
+    expect((res.content[0] as { text: string }).text).toMatch(/git version/);
+    expect(events).toEqual([]);
+    expect(ui.calls).toHaveLength(0);
+  });
+
+  it("no bell for a headless run (hasUI false) — denied without prompting", async () => {
+    const ui = fakeUi(undefined);
+    const events: string[] = [];
+    const headless = makeCtx(ui, { hasUI: false });
+    const tool = makeSandboxTool(cwd, {
+      ui,
+      ctx: headless,
+      homeDir: home,
+      bell: () => events.push("bell"),
+    });
+    await expect(
+      tool.execute("t11b", { command: "git status", sandbox: false }, undefined, undefined, headless as never),
+    ).rejects.toThrow(/denied/i);
+    expect(events).toEqual([]);
+    expect(ui.calls).toHaveLength(0);
+  });
+
   it("unlisted program + allow once runs raw and prompts again next time", async () => {
     const ui = fakeUi("allow once");
     const tool = makeSandboxTool(cwd, { ui, ctx: makeCtx(ui), homeDir: home });

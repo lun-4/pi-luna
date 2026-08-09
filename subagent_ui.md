@@ -41,8 +41,11 @@ input row at the bottom. Height is learned from the
 way an overlay component gets its viewport; chrome is laid out against it.
 
 - **Left pane** (≈40% width): header `subagents (N)`; one row per subagent
-  (`glyph type handle preview`), cursor with `selectedBg` highlight; spawns
-  and deletes update the list live without moving the selection.
+  (`glyph type handle <model> preview`) — the model segment after the handle
+  shows the resolved worker model (inherited from the primary or configured
+  via luna.json's `subagents` key), dimmed with the unselected rows — cursor
+  with `selectedBg` highlight; spawns and deletes update the list live
+  without moving the selection.
 - **Right pane**: status line (`glyph type handle status`), divider, then the
   selection's wrapped transcript (`user:` / `agent:` / `tool:` labels; rows
   filled to the pane bottom). While the subagent **runs**, the window
