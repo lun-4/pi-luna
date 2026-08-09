@@ -1,7 +1,8 @@
 # Subagent UI plan
 
 The subagents part ships two UI surfaces: a **custom footer** with one live
-line per subagent, and an **`/agents` overlay** with an overview/focus split.
+line per subagent, and an **`/agents` overlay**: a single two-pane view that
+updates live.
 
 ## Footer
 
@@ -33,30 +34,36 @@ Live updates: the footer subscribes to the registry and calls
 
 ## /agents overlay
 
-Full-screen overlay (`ctx.ui.custom`, `overlay: true`, margins 1). Height is
-learned from the `overlayOptions.visible(termWidth, termHeight)` callback —
-the only grounded way an overlay component gets its viewport; chrome is laid
-out against it.
+Full-screen overlay (`ctx.ui.custom`, `overlay: true`, margins 1). One stable
+two-pane screen — list on the left, live state of the selection on the right,
+input row at the bottom. Height is learned from the
+`overlayOptions.visible(termWidth, termHeight)` callback — the only grounded
+way an overlay component gets its viewport; chrome is laid out against it.
 
-- **Overview** — header `subagents (N)`; left pane ≈40% width: one row per
-  subagent (`glyph type handle preview`), cursor with `selectedBg` highlight;
-  right pane: the selection's condensed thread (`user:` / `agent:` / `tool:`
-  labels, middle-ellipsis when the thread overflows), plus the hint line
-  `↑↓ select • enter focus • esc close`.
-- **Enter** → focus view — header `focus: type handle status`, full transcript
-  scrolled (`↑↓` line, `pgup/pgdn` page; while the subagent streams, scroll
-  auto-follows the newest lines), divider, hint
-  `type + enter send • ctrl+c interrupt • esc back • /agents + enter close`,
-  and an `Input` row.
-- **Focus keys**: `escape` back to overview (editor cleared); `ctrl+c`
-  aborts a running subagent (clears the editor when idle); everything else
-  goes to the editor. Submit: `"/agents"` closes the overlay; any other text
-  is delivered like `subagent_send` (steer while running, prompt when idle —
+- **Left pane** (≈40% width): header `subagents (N)`; one row per subagent
+  (`glyph type handle preview`), cursor with `selectedBg` highlight; spawns
+  and deletes update the list live without moving the selection.
+- **Right pane**: status line (`glyph type handle status`), divider, then the
+  selection's wrapped transcript (`user:` / `agent:` / `tool:` labels; rows
+  filled to the pane bottom). While the subagent **runs**, the window
+  auto-follows the newest lines as text streams in; when idle, the scroll
+  position is kept.
+- **Keys**: `↑`/`↓` move the selection (wrap-around); `pgup`/`pgdn` scroll
+  the right-pane transcript; `enter` submits the input; `ctrl+c` aborts the
+  running selection (clears the input when idle); `esc` clears the input
+  first, then closes the overlay. Everything else goes to the input.
+- **Submit**: `"/agents"` closes the overlay; any other text is delivered
+  like `subagent_send` (steer while running, prompt when idle —
   fire-and-forget) and the thread refetches on settle.
-- **Transcripts**: fetched lazily per handle via `get_messages` and cached;
-  while the focused/selected subagent streams, `message_update` `text_delta`
-  events append into the last streaming entry (`applyDelta`), `message_end`
-  finalizes it, `agent_settled` triggers a full refetch. Unsubscribed on
-  overlay close.
-- Overview selection change also fetches that subagent's transcript lazily,
-  so the condensed pane fills in without entering focus.
+- **Selection**: stable by handle — a spawned/deleted subagent never yanks
+  the right pane to a different subagent; deleting the selection falls back
+  to the clamped cursor position (nearest row). On open the first subagent
+  is selected immediately, so the right pane populates without a keypress.
+- **Transcripts**: fetched lazily per handle via `get_messages` and cached
+  at selection time; while the selected subagent streams, `message_update`
+  `text_delta` events append into the last streaming entry (`applyDelta`),
+  and the thread refetches on every commit — `message_end`, each
+  `tool_execution_end` (so tool calls and results stream into the pane
+  mid-run, not just at settle), and `agent_settled` for the final state.
+  Unsubscribed on overlay close. The wrap/window math lives in the pure
+  `windowTranscript` helper (unit-tested in test/subagents.test.ts).

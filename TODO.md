@@ -14,5 +14,5 @@ list of things to do
 - [ ] add RunLua for multitooling? (parallel tooling, filtering tooling, anything the agent might want for token and request efficiency)
 - [x] subagents (general purpose and explore subagent for better planning)
 - [x] subagent UI fix: footer shouldnt have newlines on the msg
-- [ ] subagent UI /agents: the UI is very broken, impossible to actually have pi ui
+- [x] subagent UI /agents: the UI is very broken, impossible to actually have pi ui
 - [ ] real llm automode?

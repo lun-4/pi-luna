@@ -22,6 +22,7 @@ import {
   subagentPreview,
   subagentToolsFor,
   usageSuffix,
+  windowTranscript,
   type SubagentRecord,
   type TranscriptMessage,
 } from "../src/parts/subagents.js";
@@ -250,6 +251,91 @@ describe("applyDelta / finalizeStreaming", () => {
   it("finalizeStreaming is a no-op without a streaming assistant tail", () => {
     const msgs: TranscriptMessage[] = [{ role: "user", text: "q" }];
     expect(finalizeStreaming(msgs)).toBe(msgs);
+  });
+});
+
+describe("windowTranscript", () => {
+  const many = (): TranscriptMessage[] =>
+    Array.from({ length: 12 }, (_, i) => ({ role: "user", text: `m${i}` }));
+
+  it("autofollow pins the window to the newest lines", () => {
+    const out = windowTranscript(many(), 5, 50, 0, true);
+    expect(out.lines).toEqual([
+      "user: m7",
+      "user: m8",
+      "user: m9",
+      "user: m10",
+      "user: m11",
+    ]);
+    expect(out.scroll).toBe(7);
+  });
+
+  it("without autofollow keeps the given scroll", () => {
+    const out = windowTranscript(many(), 5, 50, 0, false);
+    expect(out.lines).toEqual([
+      "user: m0",
+      "user: m1",
+      "user: m2",
+      "user: m3",
+      "user: m4",
+    ]);
+    expect(out.scroll).toBe(0);
+  });
+
+  it("clamps scroll beyond the max", () => {
+    const out = windowTranscript(many(), 5, 50, 999, false);
+    expect(out.lines).toEqual([
+      "user: m7",
+      "user: m8",
+      "user: m9",
+      "user: m10",
+      "user: m11",
+    ]);
+    expect(out.scroll).toBe(7);
+  });
+
+  it("wraps long lines and autofollows the wrapped tail", () => {
+    const msgs: TranscriptMessage[] = [{ role: "user", text: "x".repeat(40) }];
+    const out = windowTranscript(msgs, 2, 20, 0, true);
+    expect(out.lines).toEqual(["x".repeat(20), "x".repeat(20)]); // 3 wrapped lines → last 2
+    expect(out.scroll).toBe(1);
+  });
+
+  it("short threads pass through with scroll 0", () => {
+    const out = windowTranscript(
+      [
+        { role: "user", text: "a" },
+        { role: "assistant", text: "b" },
+      ],
+      10,
+      50,
+      8,
+      false,
+    );
+    expect(out.lines).toEqual(["user: a", "agent: b"]);
+    expect(out.scroll).toBe(0);
+  });
+
+  it("empty transcripts yield no lines", () => {
+    expect(windowTranscript([], 5, 50, 0, true)).toEqual({ lines: [], scroll: 0 });
+  });
+
+  it("never returns more lines than rows", () => {
+    const cases: Array<[number, number, number, boolean]> = [
+      [12, 5, 50, true],
+      [12, 5, 50, false],
+      [1, 2, 20, true],
+      [3, 1, 10, false],
+      [0, 5, 50, true],
+    ];
+    for (const [n, rows, wrapWidth, autofollow] of cases) {
+      const msgs: TranscriptMessage[] = Array.from({ length: n }, (_, i) => ({
+        role: "user",
+        text: `msg ${i} `.repeat(20), // long enough to wrap
+      }));
+      const out = windowTranscript(msgs, rows, wrapWidth, 999, autofollow);
+      expect(out.lines.length, `n=${n} rows=${rows}`).toBeLessThanOrEqual(rows);
+    }
   });
 });
 

@@ -38,7 +38,7 @@ import {
   type ReadonlyFooterDataProvider,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type TUI } from "@earendil-works/pi-tui";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -279,6 +279,33 @@ export function condenseTranscript(messages: TranscriptMessage[], maxLines: numb
   if (lines.length <= maxLines) return lines;
   const half = Math.floor((maxLines - 1) / 2);
   return [...lines.slice(0, half), "…", ...lines.slice(lines.length - half)];
+}
+
+export interface TranscriptWindow {
+  lines: string[];
+  scroll: number;
+}
+
+/** Right-pane window over a transcript: wrap each rendered line to wrapWidth,
+ *  then slice `rows` lines starting at scroll. While autofollow is set the
+ *  window pins to the newest lines (streaming) and the returned scroll is the
+ *  max. Pure; used by the /agents overlay. */
+export function windowTranscript(
+  msgs: TranscriptMessage[],
+  rows: number,
+  wrapWidth: number,
+  scroll: number,
+  autofollow: boolean,
+): TranscriptWindow {
+  const wrapped: string[] = [];
+  for (const line of renderTranscript(msgs)) {
+    const w = wrapTextWithAnsi(line, Math.max(1, wrapWidth));
+    wrapped.push(...(w.length ? w : [""]));
+  }
+  const max = Math.max(0, wrapped.length - rows);
+  const pinned = autofollow ? max : Math.min(scroll, max);
+  const start = Math.min(pinned, Math.max(0, wrapped.length - rows));
+  return { lines: wrapped.slice(start, start + rows), scroll: pinned };
 }
 
 /** Append a streaming delta into the last streaming assistant entry (pure;
