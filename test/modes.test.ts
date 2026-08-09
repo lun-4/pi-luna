@@ -3,17 +3,21 @@
  * flow through a fake ModeUI seam. Runs anywhere (no TUI, no session).
  */
 import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import {
+  PLAN_PROMPT_TEMPLATE,
+  PLAN_SPEC,
+  PLAN_SPEC_PATH,
   PLAN_TOOLS,
   allowPlanWrite,
   buildAcceptKickoff,
   decideReview,
   getMode,
   planModeGate,
+  renderPlanDirective,
   resolveTarget,
   runSubmitFlow,
   subagentTypesFor,
@@ -283,10 +287,110 @@ describe("subagent modes integration", () => {
     expect(build).not.toContain("plan_submit");
   });
 
-  it("mode state starts build; plan mode spawns explore only", () => {
+  it("mode state starts build; plan mode spawns explore and plan-reviewer", () => {
     expect(getMode()).toBe("build");
-    expect(subagentTypesFor("plan")).toEqual(["explore"]);
-    expect(subagentTypesFor("build")).toEqual(["general-purpose", "explore"]);
+    expect(subagentTypesFor("plan")).toEqual(["explore", "plan-reviewer"]);
+    expect(subagentTypesFor("build")).toEqual(["general-purpose", "explore", "plan-reviewer"]);
+  });
+});
+
+describe("renderPlanDirective", () => {
+  const template = "path={{plan_path}} spec={{plan_spec}} specPath={{plan_spec_path}}";
+  const opts = {
+    template,
+    spec: "SPEC",
+    planPath: "/x/.pi/plans/s.md",
+    planSpecPath: "/x/src/parts/plan_spec_default.md",
+  };
+
+  it("replaces all three anchors", () => {
+    const out = renderPlanDirective(opts);
+    expect(out).toBe(
+      "path=/x/.pi/plans/s.md spec=SPEC specPath=/x/src/parts/plan_spec_default.md",
+    );
+    expect(out).not.toContain("{{");
+  });
+
+  it("throws when the template is missing {{plan_path}}", () => {
+    expect(() =>
+      renderPlanDirective({ ...opts, template: template.replace("{{plan_path}}", "") }),
+    ).toThrow(/\{\{plan_path\}\}/);
+  });
+
+  it("throws when the template is missing {{plan_spec}}", () => {
+    expect(() =>
+      renderPlanDirective({ ...opts, template: template.replace("{{plan_spec}}", "") }),
+    ).toThrow(/\{\{plan_spec\}\}/);
+  });
+
+  it("throws when the template is missing {{plan_spec_path}}", () => {
+    expect(() =>
+      renderPlanDirective({ ...opts, template: template.replace("{{plan_spec_path}}", "") }),
+    ).toThrow(/\{\{plan_spec_path\}\}/);
+  });
+});
+
+describe("plan directive assets (ported from polytoken)", () => {
+  const HEADINGS = [
+    "## Goal",
+    "## Implementation Summary",
+    "## Implementation Plan",
+    "## Acceptance Criteria",
+    "## Test Strategy",
+    "## Review Strategy",
+    "## Documentation Strategy",
+    "## Risks, Blockers, and Required Decisions",
+  ];
+  // The port must not leak machinery that doesn't exist in pi-luna.
+  const LEAKS = ["write_plan", "edit_plan", "handoff_plan", "shell_exec", "polytoken://"];
+
+  const rendered = () =>
+    renderPlanDirective({
+      template: PLAN_PROMPT_TEMPLATE,
+      spec: PLAN_SPEC,
+      planPath: "/sess/.pi/plans/s-1.md",
+      planSpecPath: PLAN_SPEC_PATH,
+    });
+
+  it("the template carries exactly the three anchors and no other template syntax", () => {
+    const anchors = PLAN_PROMPT_TEMPLATE.match(/\{\{[^{}]+\}\}/g) ?? [];
+    expect(new Set(anchors)).toEqual(
+      new Set(["{{plan_path}}", "{{plan_spec}}", "{{plan_spec_path}}"]),
+    );
+    // anything left after stripping the anchors must be brace-free
+    expect(PLAN_PROMPT_TEMPLATE.replace(/\{\{[^{}]+\}\}/g, "")).not.toMatch(/\{\{|\{%/);
+  });
+
+  it("renders all eight spec headings and the session plan path", () => {
+    const out = rendered();
+    for (const h of HEADINGS) expect(out).toContain(h);
+    expect(out).toContain("/sess/.pi/plans/s-1.md");
+    expect(out).not.toContain("{{plan_path}}");
+  });
+
+  it("renders with no unresolved template syntax and no polytoken tool names", () => {
+    const out = rendered();
+    expect(out).not.toMatch(/\{\{|\{%/);
+    for (const leak of LEAKS) expect(out).not.toContain(leak);
+  });
+
+  it("points the reviewer at the spec file's absolute path (PLAN_SPEC_PATH)", () => {
+    expect(isAbsolute(PLAN_SPEC_PATH)).toBe(true);
+    expect(rendered()).toContain(PLAN_SPEC_PATH);
+  });
+
+  it("names the pi-luna tools and the plan-reviewer type where the port needs them", () => {
+    const out = rendered();
+    for (const tool of ["plan_submit", "plan-reviewer", "subagent_create", "subagent_get", "subagent_delete"]) {
+      expect(out).toContain(tool);
+    }
+  });
+
+  it("plan_mode.md documents both assets and the plan-reviewer type", () => {
+    const doc = readFileSync(join(process.cwd(), "plan_mode.md"), "utf8");
+    expect(doc).toContain("plan_prompt.md");
+    expect(doc).toContain("plan_spec_default.md");
+    expect(doc).toContain("plan-reviewer");
   });
 });
 
@@ -341,7 +445,9 @@ function stubPi() {
     },
   };
   const emit = async (event: string, e: unknown, ctx: unknown) => {
-    for (const h of handlers.get(event) ?? []) await h(e, ctx);
+    let last: unknown;
+    for (const h of handlers.get(event) ?? []) last = await h(e, ctx);
+    return last;
   };
   return { pi, commands, tools, sentUserMessages, emit };
 }
@@ -497,6 +603,38 @@ describe("accept handoff (bug: accept must /new + run, not message the old sessi
     } finally {
       push.mockRestore();
     }
+  });
+});
+
+describe("plan directive injection (before_agent_start)", () => {
+  it("build mode leaves the system prompt untouched; plan mode appends the rendered directive", async () => {
+    const { default: modesFactory } = await import("../src/parts/modes.js");
+    const { pi, commands, emit } = stubPi();
+    modesFactory(pi);
+    const sessionCtx = {
+      cwd,
+      hasUI: true,
+      sessionManager: { getSessionId: () => "sess-dir" },
+      ui: { setStatus() {}, notify() {} },
+    };
+    await emit("session_start", { reason: "startup" }, sessionCtx);
+    const planPath = join(cwd, ".pi", "plans", "sess-dir.md");
+
+    // Build mode: handler returns undefined, system prompt untouched.
+    expect(await emit("before_agent_start", { systemPrompt: "BASE" }, {})).toBeUndefined();
+
+    // /plan → the rendered directive is appended.
+    await commands.get("plan")!.handler("", sessionCtx as never);
+    const result = await emit("before_agent_start", { systemPrompt: "BASE" }, {});
+    const rendered = (result as { systemPrompt?: string } | undefined)?.systemPrompt;
+    expect(rendered).toBeDefined();
+    expect(rendered!.startsWith("BASE\n")).toBe(true);
+    expect(rendered).toContain("You are in **Plan mode**");
+    expect(rendered).toContain(planPath);
+    expect(rendered).toContain("## Goal");
+    expect(rendered).toContain("plan_submit");
+    expect(rendered).toContain("plan-reviewer");
+    expect(rendered).not.toContain("{{plan_path}}");
   });
 });
 

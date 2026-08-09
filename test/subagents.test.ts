@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import {
+  TYPE_PROMPTS,
   applyDelta,
   buildReportNotification,
   collectReport,
@@ -33,6 +34,7 @@ import {
 import {
   SUBAGENT_TYPES_PER_MODE,
   planModeGate,
+  subagentTypesFor,
   toolListFor,
 } from "../src/parts/modes.js";
 
@@ -55,6 +57,10 @@ const ROOT_TOOLS = [
 describe("subagentToolsFor", () => {
   it("explore is the fixed read-only set", () => {
     expect(subagentToolsFor("explore", ROOT_TOOLS)).toEqual(["read", "grep", "find", "ls"]);
+  });
+
+  it("plan-reviewer is the same fixed read-only set", () => {
+    expect(subagentToolsFor("plan-reviewer", ROOT_TOOLS)).toEqual(["read", "grep", "find", "ls"]);
   });
 
   it("general-purpose mirrors the root tools minus subagent/ask/plan_submit", () => {
@@ -140,6 +146,28 @@ describe("spawnArgs", () => {
   });
 });
 
+describe("TYPE_PROMPTS plan-reviewer", () => {
+  it("encodes the read-only reviewer contract (severity findings + VERDICT)", () => {
+    const p = TYPE_PROMPTS["plan-reviewer"];
+    expect(p).toContain("plan-reviewer");
+    expect(p.toLowerCase()).toContain("read-only");
+    expect(p.toLowerCase()).toContain("severity");
+    expect(p).toMatch(/VERDICT: (pass|fail)/);
+    expect(p).toMatch(/FINAL message/);
+    // upstream plan-reviewer machinery ported into the system prompt
+    expect(p.toLowerCase()).toContain("test-to-acceptance-criteria");
+    expect(p).toContain("replace-vs-edit");
+    // a reviewer must stay read-only: no shell offered
+    expect(p).not.toMatch(/\bbash\b/);
+  });
+
+  it("every type has a system prompt", () => {
+    for (const t of ["general-purpose", "explore", "plan-reviewer"] as const) {
+      expect(TYPE_PROMPTS[t]).toBeTruthy();
+    }
+  });
+});
+
 describe("parseSubagentConfig", () => {
   it("extracts the subagents key (null entries + object overrides)", () => {
     const cfg = parseSubagentConfig({
@@ -158,6 +186,19 @@ describe("parseSubagentConfig", () => {
         model: "openrouter/deepseek/deepseek-v4-flash-0731",
         thinking: "off",
       },
+    });
+  });
+
+  it("accepts plan-reviewer entries (null and object shapes)", () => {
+    const cfg = parseSubagentConfig({
+      subagents: {
+        "plan-reviewer": null,
+        explore: { model: "openrouter/deepseek/deepseek-v4-flash-0731", thinking: "off" },
+      },
+    });
+    expect(cfg).toEqual({
+      "plan-reviewer": null,
+      explore: { model: "openrouter/deepseek/deepseek-v4-flash-0731", thinking: "off" },
     });
   });
 
@@ -266,6 +307,18 @@ describe("resolveSubagentModel", () => {
     expect(resolveSubagentModel("explore", cfg, PRIMARY)).toEqual({
       model: "openrouter/deepseek/deepseek-v4-flash-0731",
       thinking: "xhigh",
+      source: "config",
+    });
+  });
+
+  it("plan-reviewer resolves its own config entry independently", () => {
+    const cfg: SubagentConfig = {
+      "plan-reviewer": { model: "openrouter/deepseek/deepseek-v4-flash-0731", thinking: "off" },
+      explore: null,
+    };
+    expect(resolveSubagentModel("plan-reviewer", cfg, PRIMARY)).toEqual({
+      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      thinking: "off",
       source: "config",
     });
   });
@@ -796,9 +849,17 @@ describe("messagesToTranscript", () => {
 });
 
 describe("plan-mode integration", () => {
-  it("plan mode only spawns explore subagents", () => {
-    expect(SUBAGENT_TYPES_PER_MODE.plan).toEqual(["explore"]);
-    expect(SUBAGENT_TYPES_PER_MODE.build).toEqual(["general-purpose", "explore"]);
+  it("plan mode spawns explore and plan-reviewer; build mode all three", () => {
+    expect(SUBAGENT_TYPES_PER_MODE.plan).toEqual(["explore", "plan-reviewer"]);
+    expect(SUBAGENT_TYPES_PER_MODE.build).toEqual(["general-purpose", "explore", "plan-reviewer"]);
+    expect(subagentTypesFor("plan")).toContain("plan-reviewer");
+  });
+
+  it("planModeGate passes subagent_create requesting plan-reviewer in plan mode", () => {
+    const state = { mode: "plan" as const, planPath: "/x/.pi/plans/s.md", handoffPending: undefined };
+    expect(
+      planModeGate(state, "subagent_create", { subagent_type: "plan-reviewer" }, "/x"),
+    ).toEqual({ block: false });
   });
 
   it("plan toolset includes the subagent tools", () => {

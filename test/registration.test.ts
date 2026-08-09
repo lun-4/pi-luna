@@ -134,4 +134,16 @@ describe("subagents part registration", () => {
     const tool = pi.tools.find((t) => t.name === "subagent_get");
     expect(tool.parameters).toBeDefined();
   });
+
+  it("subagent_create schema accepts the plan-reviewer literal", () => {
+    const pi = stubPi();
+    subagentsFactory(pi as unknown as ExtensionAPI);
+    const tool = pi.tools.find((t) => t.name === "subagent_create");
+    const subagentType = (tool.parameters as any).properties.subagent_type;
+    expect(subagentType.anyOf.map((t: { const?: string }) => t.const)).toEqual([
+      "general-purpose",
+      "explore",
+      "plan-reviewer",
+    ]);
+  });
 });

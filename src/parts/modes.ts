@@ -10,7 +10,8 @@
  *   - write/edit are gated to the single plan file
  *     (<cwd>/.pi/plans/<sessionId>.md) by one pure tool_call guard
  *   - plan directives are appended to the system prompt on every turn that
- *     starts in plan mode
+ *     starts in plan mode, rendered from parts/plan_prompt.md (ported from
+ *     polytoken's plan facet) with parts/plan_spec_default.md inlined
  *
  * The plan is a real file owned here; the agent develops it with normal
  * write/edit, and plan_submit takes a handle to it. Submission prints the
@@ -40,10 +41,11 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Text, type Component } from "@earendil-works/pi-tui";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Type, type Static } from "typebox";
 // Type-only: the runtime import of subagents.ts lives in subagents.ts itself
 // (it imports getMode/subagentTypesFor from here) — no runtime cycle.
@@ -109,10 +111,12 @@ export function getMode(): Mode {
   return state.mode;
 }
 
-/** Which subagent types a mode may spawn. Plan mode is read-only research. */
+/** Which subagent types a mode may spawn. Plan mode is read-only research;
+ *  plan-reviewer joins explore there; build gets all three (review passes
+ *  run in the executing session too). */
 export const SUBAGENT_TYPES_PER_MODE: Record<Mode, readonly SubagentType[]> = {
-  build: ["general-purpose", "explore"],
-  plan: ["explore"],
+  build: ["general-purpose", "explore", "plan-reviewer"],
+  plan: ["explore", "plan-reviewer"],
 };
 
 export function subagentTypesFor(mode: Mode): readonly SubagentType[] {
@@ -128,13 +132,67 @@ export const PLAN_TOOLS = [
   "plan_submit",
   "write",
   "edit",
-  // subagent tools: create is gated to explore-only by the subagents part's
-  // own tool_call handler; send/get/delete are free in both modes.
+  // subagent tools: create is gated to the mode's allowed subagent types
+  // (explore/plan-reviewer in plan mode) by the subagents part's own
+  // tool_call handler; send/get/delete are free in both modes.
   "subagent_create",
   "subagent_send",
   "subagent_get",
   "subagent_delete",
 ] as const;
+
+// ---------------------------------------------------------------------------
+// Plan directive assets (ported from polytoken — keep in sync with upstream)
+// ---------------------------------------------------------------------------
+
+// The import.meta.url pattern subagents.ts uses (deliberately NOT bare
+// __dirname): tests import modes.ts directly, and fileURLToPath resolves to
+// the real source directory both under pi's jiti loader and under vitest.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/** Ported from polytoken's shipped plan facet (facets/plan.md). Template for
+ *  the per-turn plan-mode directive; exported so tests assert on the exact
+ *  text the runtime renders. */
+export const PLAN_PROMPT_TEMPLATE = readFileSync(
+  path.join(__dirname, "plan_prompt.md"),
+  "utf8",
+);
+
+/** Ported from polytoken's default plan specification. Splices into the
+ *  directive at the {{plan_spec}} anchor; exported for the same reason. */
+export const PLAN_SPEC = readFileSync(
+  path.join(__dirname, "plan_spec_default.md"),
+  "utf8",
+);
+
+/** Absolute path of the spec asset. The directive's {{plan_spec_path}} anchor
+ *  points plan-reviewer task messages at it, so it must be a path the
+ *  reviewer subagent can read, not a bare filename. */
+export const PLAN_SPEC_PATH = path.join(__dirname, "plan_spec_default.md");
+
+const PLAN_ANCHORS = ["{{plan_path}}", "{{plan_spec}}", "{{plan_spec_path}}"] as const;
+
+/**
+ * Splice the plan directive template with the session's plan path and the
+ * inlined plan specification. Fail-fast: a template missing any anchor
+ * throws instead of silently dropping the spec after a doc edit.
+ */
+export function renderPlanDirective(opts: {
+  template: string;
+  spec: string;
+  planPath: string;
+  planSpecPath: string;
+}): string {
+  for (const anchor of PLAN_ANCHORS) {
+    if (!opts.template.includes(anchor)) {
+      throw new Error(`plan directive template is missing anchor ${anchor}`);
+    }
+  }
+  return opts.template
+    .replaceAll("{{plan_path}}", opts.planPath)
+    .replaceAll("{{plan_spec}}", opts.spec)
+    .replaceAll("{{plan_spec_path}}", opts.planSpecPath);
+}
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested directly)
@@ -427,17 +485,17 @@ export default function (pi: ExtensionAPI) {
 
   // -- plan directives --------------------------------------------------------
 
+  // The directive is rendered per plan-mode turn from the two asset files
+  // (plan_prompt.md + plan_spec_default.md, ported from polytoken's plan
+  // facet); renderPlanDirective throws if an anchor ever goes missing.
   pi.on("before_agent_start", async (event) => {
     if (state.mode !== "plan" || !state.planPath) return;
-    const directive = [
-      "",
-      `You are in **Plan mode**. The plan file is \`${state.planPath}\`.`,
-      "Develop the plan there using `write` and `edit` — no other file is writable, and there is no shell.",
-      "Use `read` and the search tools freely, and `ask` when a decision forks the plan.",
-      "A plan states the goal, ordered steps, files touched, risks, and open questions.",
-      "You may spawn `explore` subagents with `subagent_create` (read-only researchers) to investigate the codebase; collect their report with `subagent_get`.",
-      "When it's complete, submit it with `plan_submit` (passing the file path); you may revise and resubmit until the user accepts.",
-    ].join("\n");
+    const directive = renderPlanDirective({
+      template: PLAN_PROMPT_TEMPLATE,
+      spec: PLAN_SPEC,
+      planPath: state.planPath,
+      planSpecPath: PLAN_SPEC_PATH,
+    });
     return { systemPrompt: event.systemPrompt + "\n" + directive };
   });
 

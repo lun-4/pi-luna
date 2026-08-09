@@ -3,11 +3,12 @@
 Goal: let the primary agent spawn real, separate pi sessions — child processes
 speaking pi's JSONL RPC protocol over stdio — each with a toolset fixed by its
 type. `explore` subagents are read-only researchers (`read`, `grep`, `find`,
-`ls`); `general-purpose` subagents share the root build toolset with bash
-sandboxed. Modes dictate which types a mode can spawn (plan mode: `explore`
-only). The model interfaces through `subagent_create` / `subagent_send` /
-`subagent_get` / `subagent_delete`; the TUI gains footer lines per live
-subagent and an `/agents` split-pane overlay.
+`ls`); `plan-reviewer` subagents are read-only plan reviewers (same toolset as
+explore); `general-purpose` subagents share the root build toolset with bash
+sandboxed. Modes dictate which types a mode can spawn (plan mode:
+`explore`/`plan-reviewer`). The model interfaces through `subagent_create` /
+`subagent_send` / `subagent_get` / `subagent_delete`; the TUI gains footer lines
+per live subagent and an `/agents` split-pane overlay.
 
 ## Decisions locked in
 
@@ -26,15 +27,17 @@ subagent and an `/agents` split-pane overlay.
   | type | tools |
   |---|---|
   | `explore` | `read`, `grep`, `find`, `ls` |
+  | `plan-reviewer` | `read`, `grep`, `find`, `ls` (same fixed set as `explore`; own system prompt) |
   | `general-purpose` | root build toolset minus `subagent_*`, `ask`, `plan_submit` (bash included) |
 - **Spawn shape** (order-sensitive):
   `cli.js --mode rpc --no-extensions [--extension sandbox.ts] --session-dir <dir> --model <p>/<m> --thinking <level> --system-prompt <type prompt> --approve|--no-approve --tools <csv>`.
   Session dir: `<agentDir>/sessions/<cwd>--/subagents/<handle>/` (kept on
   delete for archaeology; resume-from-disk out of scope).
 - **Plan-mode gate**: modes.ts exports `getMode()`/`subagentTypesFor()`; plan
-  mode spawns `explore` only (`subagent_create` blocked with a clear reason).
-  The plan directive mentions explore subagents. `PLAN_TOOLS` includes all
-  four subagent tools (send/get/delete are free in both modes).
+  mode spawns `explore` + `plan-reviewer` (`subagent_create` blocked with a
+  clear reason for other types). The plan directive names both plan-mode types
+  and runs the review loop on `plan-reviewer`. `PLAN_TOOLS` includes all four
+  subagent tools (send/get/delete are free in both modes).
 - **Handle tools, non-blocking by design.** `subagent_create`/`subagent_send`
   return on the worker's command ack, never on settle. When a subagent
   settles, its final report is **queued back to the primary automatically**

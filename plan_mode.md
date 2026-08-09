@@ -193,15 +193,34 @@ session_start and every toggle. Cleared on shutdown.
   toolset strip). Everything else passes.
 
 **Plan directives** — `pi.on("before_agent_start")`: if `mode === "plan"`,
-append to the chained system prompt:
+append to the chained system prompt a rendered planning directive. The
+directive is a port of polytoken's shipped plan facet
+(`polytoken://facets/plan.md`): read-only side-effect discipline, intent
+classification, the plan artifact specification, and the plan-review loop.
+Two markdown assets in `src/parts/` are the source of truth — editing them
+changes the prompt without touching TypeScript:
 
-> You are in **Plan mode**. The plan file is `<planPath>`. Develop the plan
-> there using `write` and `edit` — no other file is writable, and there is no
-> shell. Use `read` and the search tools freely, and `ask` when a decision
-> forks the plan. A plan states the goal, ordered steps, files touched,
-> risks, and open questions. When it's complete, submit it with
-> `plan_submit` (passing the file path); you may revise and resubmit until
-> the user accepts.
+- `src/parts/plan_prompt.md` — the directive body. Carries exactly three
+  template anchors: `{{plan_path}}`, `{{plan_spec}}`, `{{plan_spec_path}}`.
+- `src/parts/plan_spec_default.md` — the plan artifact specification (Goal /
+  Implementation Summary / Implementation Plan / Acceptance Criteria / Test
+  Strategy / Review Strategy / Documentation Strategy / Risks), a port of
+  polytoken's default plan spec (`polytoken://resources/plan_spec_default.md`),
+  spliced in at the `{{plan_spec}}` anchor.
+
+`modes.ts` reads both at load via the `import.meta.url` pattern
+(`renderPlanDirective()` splices them per plan-mode turn and throws if an
+anchor ever goes missing, so a doc edit can't silently drop the spec). The
+polytoken → pi-luna tool-name mapping the port follows is the table in the
+port's plan document, under `.pi/plans/`.
+
+The directive runs the review loop on a dedicated **`plan-reviewer`**
+subagent type (see `subagents.ts`): a read-only reviewer with its own system
+prompt (explore toolset) that reads the plan file and the specification and
+returns severity-tagged findings. Review is strongly recommended, not
+required — luna decides at the `plan_submit` approval step. Test-infrastructure
+gaps must be handled by revising the plan to build the missing infra; they are
+surfaced via `ask` before `plan_submit` only when genuinely out of scope.
 
 ### plan_submit
 

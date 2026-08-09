@@ -4,12 +4,13 @@
  * The primary agent spawns real, separate pi sessions: child processes
  * speaking pi's JSONL RPC protocol over stdio (RpcProcess, ported from
  * landstrip). A toolset fixed by type: `explore` = read-only researchers
- * (read/grep/find/ls), `general-purpose` = the root build toolset (bash runs
+ * (read/grep/find/ls), `plan-reviewer` = read-only plan reviewer (same
+ * toolset as explore), `general-purpose` = the root build toolset (bash runs
  * sandboxed via the sandbox part loaded as a worker extension; sandbox:false
  * prompts are default-cancelled inside workers). See subagent_architecture.md.
  *
  * The model interfaces through four tools:
- *   subagent_create  — spawn (cap 8, plan mode: explore only)
+ *   subagent_create  — spawn (cap 8, plan mode: explore/plan-reviewer only)
  *   subagent_send    — steer a running subagent or prompt an idle one
  *   subagent_get     — status + cached final report
  *   subagent_delete  — stop the process, free the slot
@@ -65,7 +66,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Types & constants
 // ---------------------------------------------------------------------------
 
-export type SubagentType = "general-purpose" | "explore";
+export type SubagentType = "general-purpose" | "explore" | "plan-reviewer";
 export type SubagentStatus = "spawning" | "running" | "idle" | "stopped" | "error";
 
 export const SUBAGENT_TOOLS = [
@@ -176,6 +177,52 @@ export const TYPE_PROMPTS: Record<SubagentType, string> = {
     "you were given; your FINAL message must contain a concise report of what you did and " +
     "found, so the primary can act on it. Your final message is delivered back to the " +
     "primary automatically when you settle.",
+  "plan-reviewer":
+    "You are the **plan-reviewer** subagent: a read-only plan reviewer spawned by the primary " +
+    "agent. Your only tools are read, grep, find, ls — no shell, no writes, no subagent spawns. " +
+    "Your task message names the plan file path and the plan specification file path (a " +
+    "markdown document defining the required plan shape); read both yourself — the files are " +
+    "the truth. When the caller included the user's original request, context, and inspected " +
+    "files, use them to judge fidelity to the actual request.\n\n" +
+    "## Review work\n" +
+    "1. Verify the plan follows the specification's shape: all required sections present (Goal, " +
+    "Implementation Summary, Implementation Plan, Acceptance Criteria, Test Strategy, Review " +
+    "Strategy, Documentation Strategy, Risks/Blockers/Required Decisions); acceptance " +
+    "criteria named AC.1, AC.2, …; each criterion observable, not a restatement of steps; " +
+    "implementation unknowns resolved; no plan-of-plans.\n" +
+    "2. Audit test-to-acceptance-criteria coverage — a core responsibility, not a nice-to-have. " +
+    "Every criterion needs at least one named test that would fail if the behavior regressed. " +
+    "Flag criteria with no mapped test (at least medium; high for core behavior), euphemisms " +
+    "such as \"code inspection\" / \"implicitly verified\" / \"covered by existing tests\", " +
+    "pre-existing tests that would pass regardless, and test-layer mismatches (pure logic " +
+    "tested only at integration level, or full-stack behavior mocked at unit level when an " +
+    "integration harness exists).\n" +
+    "3. Assess test infrastructure adequacy. If a behavior cannot be adequately tested because " +
+    "the harness does not exist, the plan should include a phase to build the missing " +
+    "infrastructure (implementation phase + acceptance criteria + tests for the " +
+    "infrastructure itself). High if a core behavior is untestable and the plan neither " +
+    "includes the infrastructure nor acknowledges the gap; medium if the gap is acknowledged " +
+    "but not built; low if coverage could simply be stronger.\n" +
+    "4. Orient yourself in the relevant repository code. Inspect enough to judge whether the " +
+    "plan reflects the real implementation surfaces and likely contracts.\n" +
+    "5. Assess replace-vs-edit trade-offs. Flag incremental editing when replacement would be " +
+    "cleaner: high-churn edits (>~60% of a module's substantive lines), accumulated " +
+    "complexity, contract changes (signature/return type/error model/invariants), wrong " +
+    "underlying structure, or workarounds around code that should be replaced. High when " +
+    "edits would likely produce bugs or unmaintainable code; medium for quality concerns.\n\n" +
+    "## Severity guide\n" +
+    "- critical: unsafe to hand off; execution would likely fail badly, corrupt state, violate " +
+    "an explicit instruction, or miss the core goal.\n" +
+    "- high: major gap — missing required contract, wrong file/module, missing review loop, or " +
+    "likely test failure.\n" +
+    "- medium: executable but with a meaningful quality, coverage, sequencing, or " +
+    "maintainability issue.\n" +
+    "- low: minor improvement, clarity issue, or small risk that does not block handoff.\n\n" +
+    "Report findings classified by severity (critical / high / medium / low), quoting the plan " +
+    "where relevant, and end with a final line `VERDICT: pass` or `VERDICT: fail` (fail when " +
+    "any critical or high finding remains). If there are no findings, say so and pass. Your " +
+    "FINAL message is the findings report — it is delivered back to the primary automatically " +
+    "when you settle.",
 };
 
 // ---------------------------------------------------------------------------
@@ -219,9 +266,9 @@ export function parseSubagentConfig(raw: unknown): SubagentConfig {
   }
   const cfg: SubagentConfig = {};
   for (const [key, value] of Object.entries(raw.subagents)) {
-    if (key !== "explore" && key !== "general-purpose") {
+    if (key !== "explore" && key !== "general-purpose" && key !== "plan-reviewer") {
       console.warn(
-        `[luna] subagents config: unknown subagent type "${key}" (expected "explore" or "general-purpose") — ignoring`,
+        `[luna] subagents config: unknown subagent type "${key}" (expected "explore", "general-purpose", or "plan-reviewer") — ignoring`,
       );
       continue;
     }
@@ -317,13 +364,14 @@ export function resolveSubagentModel(
   return { model, thinking, source };
 }
 
-/** The worker toolset for a subagent type. explore is fixed; general-purpose
- *  mirrors the root build toolset minus subagent/ask/plan_submit tools. */
+/** The worker toolset for a subagent type. explore and plan-reviewer are
+ *  fixed read-only; general-purpose mirrors the root build toolset minus
+ *  subagent/ask/plan_submit tools. */
 export function subagentToolsFor(
   type: SubagentType,
   rootTools: string[],
 ): string[] {
-  if (type === "explore") return [...EXPLORE_TOOLS];
+  if (type === "explore" || type === "plan-reviewer") return [...EXPLORE_TOOLS];
   // ask is excluded because worker prompts would proxy to the parent and get
   // cancelled; plan_submit is the root's plan-file concern. bash stays.
   return rootTools.filter(
@@ -831,7 +879,11 @@ export function makeFooter(
 // ---------------------------------------------------------------------------
 
 const createSchema = Type.Object({
-  subagent_type: Type.Union([Type.Literal("general-purpose"), Type.Literal("explore")]),
+  subagent_type: Type.Union([
+    Type.Literal("general-purpose"),
+    Type.Literal("explore"),
+    Type.Literal("plan-reviewer"),
+  ]),
   message: Type.String({ description: "Initial message: the task context and the report the subagent must produce" }),
 });
 type CreateParams = Static<typeof createSchema>;
@@ -1119,7 +1171,7 @@ export default function (pi: ExtensionAPI) {
     if (event.toolName !== "subagent_create") return;
     const requested = isRecord(event.input) ? event.input.subagent_type : undefined;
     if (!subagentTypesFor(getMode()).includes(requested as SubagentType)) {
-      return { block: true, reason: "Plan mode only spawns explore subagents" };
+      return { block: true, reason: "Plan mode only spawns explore and plan-reviewer subagents" };
     }
   });
 
@@ -1135,15 +1187,17 @@ export default function (pi: ExtensionAPI) {
     label: "subagent_create",
     description:
       "Spawn a process-backed subagent (a separate pi session) and give it its first task. " +
-      "explore subagents are read-only researchers (read/grep/find/ls only); general-purpose " +
-      "subagents share your tools (their bash is sandboxed). Returns immediately; the subagent " +
-      "works asynchronously in the background. When it settles, its final report is queued " +
-      "back to you automatically — you can end your turn and wait. subagent_get is for " +
-      "status/last message on demand; subagent_delete frees it.",
-    promptSnippet: "Delegate a scoped task to a subagent (explore = read-only research)",
+      "explore subagents are read-only researchers (read/grep/find/ls only); plan-reviewer " +
+      "subagents are read-only reviewers that check a plan file against a plan specification; " +
+      "general-purpose subagents share your tools (their bash is sandboxed). Returns " +
+      "immediately; the subagent works asynchronously in the background. When it settles, its " +
+      "final report is queued back to you automatically — you can end your turn and wait. " +
+      "subagent_get is for status/last message on demand; subagent_delete frees it.",
+    promptSnippet: "Delegate a scoped task to a subagent (explore/plan-reviewer = read-only research)",
     promptGuidelines: [
-      "General-purpose subagents share your tools; explore subagents are read-only researchers",
-      "Plan mode can only spawn explore subagents",
+      "General-purpose subagents share your tools; explore and plan-reviewer subagents are read-only",
+      "Plan mode can spawn explore and plan-reviewer subagents",
+      "plan-reviewer subagents review the plan file against the plan specification and return severity-tagged findings — fix or rebut them before plan_submit",
       "Subagents run async: after spawning (or sending), you may end your turn and wait — the subagent's final report is queued back to you as a message when it settles; do NOT poll with subagent_get",
       "subagent_get is for on-demand status or an earlier snapshot, not for waiting",
       "Delete finished subagents with subagent_delete to free slots (cap 8)",
