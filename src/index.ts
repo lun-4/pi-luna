@@ -33,6 +33,10 @@ interface LunaConfig {
 
 /** Descriptor per dynamic sub-extension. Only these are ever imported. */
 const PARTS_SPEC: Record<string, { description: string; file: string }> = {
+  ask: {
+    description: "Agent tool to ask the user structured questions",
+    file: join(__dirname, "parts", "ask.ts"),
+  },
   bell: {
     description: "Rings the terminal bell on agent settle",
     file: join(__dirname, "parts", "bell.ts"),
@@ -48,6 +52,10 @@ const PARTS_SPEC: Record<string, { description: string; file: string }> = {
   sandbox: {
     description: "Runs agent bash commands inside a landstrip sandbox",
     file: join(__dirname, "parts", "sandbox.ts"),
+  },
+  modes: {
+    description: "Build/Plan mode switching (shift+tab)",
+    file: join(__dirname, "parts", "modes.ts"),
   },
 };
 

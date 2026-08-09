@@ -9,6 +9,8 @@ things i want from polytoken
 - plan mode (requires subagents)
 
 list of things to do
-- [ ] sandboxing policy that fits CC's automode
-- [ ] make ask prompts emit terminal bell
-- [ ] add RunLua for multitooling (parallel tooling, filtering tooling, anything the agent might want for token and request efficiency)
+- [x] sandboxing policy that fits CC's automode
+- [ ] make ask prompts emit terminal bell (plan mode?)
+- [ ] add RunLua for multitooling? (parallel tooling, filtering tooling, anything the agent might want for token and request efficiency)
+- [ ] subagents (general purpose and explore subagent for better planning)
+- [ ] real llm automode?
