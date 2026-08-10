@@ -239,8 +239,74 @@ runRaw(): spawn via createLocalBashOperations()  // identical kill/timeout/shell
 
 ## Later phases (not this plan)
 
-- Auto-mode approval model ahead of the UI menu in the `sandbox:false` gate
-  (stub hook left in place).
+- ~~Auto-mode approval model ahead of the UI menu in the `sandbox:false` gate~~
+  **DONE — Phase 3.** `src/parts/command-parser.ts` + `src/parts/classifier.ts` +
+  `classifier-prompt.md`; see **Auto-mode classifier** below.
+  (Arg-pattern rules, richer `/sandbox` TUI, egress control remain future work.)
+- ~~Classifier benchmark suite~~ **DONE.** `benchmarks/classifier/` corpus (34
+  stories), `candidate-prompts/` (strict/lax), and an offline validator + gated
+  live runner in `test/benchmark-classifier.test.ts`. Judge a model × prompt:
+  `npm run bench:classifier` (needs `OPENROUTER_API_KEY` / runtime auth).
+
+---
+
+## Appendix: auto-mode classifier design (Phase 3)
+
+### Gate shape
+
+The `sandbox:false` gate is now a **conservative single-simple-command parser**
+(`src/parts/command-parser.ts`, `parseEscalationRequest`) rather than an argv0
+sniff. It is quote/escape-aware (single/double quotes, backslash, `$(`, `$((`,
+backticks), peels leading `VAR=value` assignments and **one** leading `cd X
+&&|;`, and treats as compound anything with a remaining separator or a wrapper
+word (`sudo`, `eval`, `exec`, `env`, `nohup`, `time`, `xargs`) or interpreter
+recursion (`sh|bash -c`); it deems a program an interpreter from
+`interpreterSet`. Unparseable ⇒ compound (fail-safe).
+
+Routing for `sandbox:false`:
+- **Compound / unparseable** → adjudicate (never silent-allow, even when argv0
+  is allowlisted; `cd` is never a menu key).
+- **Provably simple + allowlisted + non-interpreter** → **silent raw**, unless
+  auto mode + `bypassAllowlist` (then the classifier runs).
+- **Everything else** → interactive menu (unchanged), **or** in auto mode a
+  one-shot **classifier** call.
+
+### Classifier (`src/parts/classifier.ts`)
+
+- Strict-schema **tool calling** for the verdict: single `classifier_verdict`
+  tool (`{approved: boolean, reason: string}`) with
+  `constrainedSampling: {type: "json_schema", strict: "require"}`, forced
+  `toolChoice`, `temperature: 0`, via `ctx.modelRegistry.complete()` (no
+  `responseFormat` param exists). Default model `deepseek/deepseek-v4-flash-0731`
+  under the `openrouter` provider.
+- **Redaction**: `buildClassifierThread` keeps user/assistant (incl. `toolCall`
+  blocks) + compaction/branch_summary/custom_message; drops **every**
+  `toolResult`/`bashExecution` (zero tool output reaches the LLM); appends one
+  final permission-request user message with `cwd` + verbatim command; truncates
+  from the head.
+- **Never persists**: the classifier cannot add to `sessionAllow` or write any
+  config. Auto-approvals last one command.
+- **Fail-safe**: every failure path (`onUpdate` crash, timeout, no tool call,
+  invalid verdict, model-not-found/auth, network) routes to `fallback`
+  (`prompt`/`deny`/`sandbox`), never raw. Classifier usage is merged into the
+  tool-result `usage` via `addUsage`.
+
+### Auto mode
+
+Config block `autoMode` (`sandbox.json`): `enabled`, `model`, `maxTokens`,
+`timeoutMs`, `fallback` (default `prompt`), `bypassAllowlist` (default `false`).
+With `enabled`, a simple allowlisted command is still silent-raw unless
+`bypassAllowlist`. Auto-approve/deny transactions and the last 5 runs show up in
+`/sandbox`.
+
+### Benchmark
+
+`benchmarks/classifier/` — 34-story malicious-agent corpus (benign, secret-read,
+cd-trampoline, chain-injection, interpreter-abuse, obfuscation, network-exfil,
+destructive, repo-exfil, package-install, decoy, ambiguous). The offline
+validator enforces the redaction invariant + corpus/product round-trip; the gated
+live runner sweeps {model × prompt} through the real
+`createModelRegistryClassifier` and writes `RESULTS.md`.
 - Outbound network control, if ever wanted, via landstrip's authenticated
   egress proxy (per-domain `allowedDomains`). Decided out of scope for now —
   network is simply open in the sandbox.

@@ -7,6 +7,18 @@
  * escalation is gated by an unsandboxed-program allowlist (session → project →
  * global → base) and otherwise prompts luna live.
  *
+ * The gate is structured around a conservative single-simple-command parser
+ * (src/parts/command-parser.ts): `sandbox:false` requests that are provably a
+ * single simple, non-interpreter, allowlisted command run raw **silently**
+ * (the friction reducer); everything else — compound/`&&`/`;`/`cd`-wrapped
+ * commands, interpreters, unlisted programs — reaches adjudication:
+ *
+ *   - interactive mode: the existing verbatim approval menu
+ *   - auto mode (`autoMode.enabled`): a secondary LLM "classifier" reviews the
+ *     redacted conversation thread + the verbatim command and returns a strict
+ *     yes/no (src/parts/classifier.ts). The classifier never persists a grant
+ *     and never "always allows"; every failure fails safe toward the human.
+ *
  * Sandboxed runs are fire-and-forget: landstrip enforces a static policy and
  * writes terminal trap records as JSON lines on the child's stderr. We parse
  * those to detect "failed because of the sandbox" and surface the denied
@@ -22,10 +34,10 @@
  * `~/.ssh` & co. stay denied.
  *
  * Config tiers (base < global < project < session), arrays concatenate,
- * objects merge, later scalars win. `unsandboxedAllow` is a pi-luna addition
- * and is stripped before the policy is handed to landstrip. The global tier
- * is ~/.pi/agent/luna-sandbox.json — NOT ~/.pi/agent/sandbox.json, which
- * belongs to pi-landstrip and carries incompatible network semantics.
+ * objects merge, later scalars win. `unsandboxedAllow`, `autoMode` are
+ * pi-luna additions and are stripped before the policy is handed to landstrip.
+ * The global tier is ~/.pi/agent/luna-sandbox.json — NOT ~/.pi/agent/sandbox.json,
+ * which belongs to pi-landstrip and carries incompatible network semantics.
  */
 
 import {
@@ -39,6 +51,18 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { binaryPath } from "@landstrip/landstrip";
 import { ringBell } from "./bell.ts";
+import {
+  parseEscalationRequest,
+  DEFAULT_INTERPRETER_PROGRAMS,
+} from "./command-parser.ts";
+import {
+  addUsage,
+  buildClassifierThread,
+  createModelRegistryClassifier,
+  resolveSystemPrompt,
+  type ClassifiedRun,
+  type ClassifierClient,
+} from "./classifier.ts";
 import { spawn, execFile } from "node:child_process";
 import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -55,9 +79,24 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Types
 // ---------------------------------------------------------------------------
 
+export interface SandboxAutoModeConfig {
+  enabled?: boolean;
+  model?: string;
+  maxTokens?: number;
+  timeoutMs?: number;
+  /** What happens when the classifier can't run or declines to commit. */
+  fallback?: "prompt" | "deny" | "sandbox";
+  maxTranscriptChars?: number;
+  /** true ⇒ even parsed-simple allowlisted commands go to the classifier. */
+  bypassAllowlist?: boolean;
+  systemPromptFile?: string;
+  interpreterPrograms?: string[];
+}
+
 export interface SandboxConfig {
   enabled?: boolean;
   unsandboxedAllow?: string[];
+  autoMode?: SandboxAutoModeConfig;
   shell?: Record<string, unknown>;
   network?: Record<string, unknown>;
   filesystem?: {
@@ -68,6 +107,9 @@ export interface SandboxConfig {
   };
   [key: string]: unknown;
 }
+
+/** Default model id as catalogued under the openrouter provider. */
+export const DEFAULT_AUTO_MODEL = "deepseek/deepseek-v4-flash-0731";
 
 /** Trap codes we treat as "denied because of the sandbox". */
 const DENIAL_CODES = new Set(["FILESYSTEM_DENIED", "NETWORK_DENIED"]);
@@ -206,7 +248,7 @@ export function mergeTiers(tiers: (SandboxConfig | undefined)[]): SandboxConfig 
 
 /** Strip pi-luna-only keys before handing the policy to landstrip. */
 export function landstripPolicy(cfg: SandboxConfig): Record<string, unknown> {
-  const { enabled: _e, unsandboxedAllow: _u, ...rest } = cfg;
+  const { enabled: _e, unsandboxedAllow: _u, autoMode: _a, ...rest } = cfg;
   return rest;
 }
 
@@ -362,6 +404,10 @@ export interface SandboxToolDeps {
   persistGlobal?: (argv0: string) => Promise<void>;
   /** Test seam: override where the global tier is read from. */
   homeDir?: string;
+  /** Test seam: inject a fake classifier; otherwise built lazily from ctx.modelRegistry. */
+  classifier?: ClassifierClient;
+  /** Session-scoped audit trail of auto-mode decisions (shared with /sandbox). */
+  classifierLog?: ClassifiedRun[];
   /**
    * Ring the terminal bell (\a) to get luna's attention before the approval
    * dialog blocks. Optional so minimal test constructions keep compiling;
@@ -375,6 +421,7 @@ export function makeSandboxTool(
   deps: SandboxToolDeps,
 ): ToolDefinition<typeof schema, BashToolDetails | undefined, unknown> {
   const sessionAllow = deps.sessionAllow ?? new Set<string>();
+  const classifierLog = deps.classifierLog ?? ([] as ClassifiedRun[]);
 
   function effectiveConfig(cwd: string): SandboxConfig {
     const { config } = loadConfig({
@@ -382,7 +429,10 @@ export function makeSandboxTool(
       trusted: deps.ctx.isProjectTrusted(),
       homeDir: deps.homeDir,
     });
-    return mergeTiers([deps.config, config]);
+    // deps.config (per-tool override) takes highest precedence, above the
+    // loaded base/global/project tiers. Not passed in production; used by
+    // tests to force specific gate config (e.g. auto mode on/off).
+    return mergeTiers([config, deps.config]);
   }
 
   function rawExecute(
@@ -436,6 +486,207 @@ export function makeSandboxTool(
     },
   };
 
+  /** Footer status text reflecting auto mode + session raw grants. */
+  function statusText(config: SandboxConfig, rawCount: number): string {
+    const am = config.autoMode;
+    if (am?.enabled) {
+      const modelShort = (am.model ?? DEFAULT_AUTO_MODEL).split("/").pop() ?? DEFAULT_AUTO_MODEL;
+      return `sandbox:auto (${modelShort})` + (rawCount ? ` (${rawCount} raw)` : "");
+    }
+    return rawCount ? `sandbox:on (${rawCount} raw)` : "sandbox:on";
+  }
+
+  /** The verbatim approval menu (interactive fallback and legacy gate path). */
+  async function adjudicateMenu(opts: {
+    params: { command: string; timeout?: number };
+    signal: AbortSignal | undefined;
+    onUpdate: Parameters<ReturnType<typeof createBashToolDefinition>["execute"]>[3];
+    ctx: ExtensionContext;
+    toolCallId: string;
+    gateKey: string;
+    config: SandboxConfig;
+  }): Promise<ReturnType<ReturnType<typeof createBashToolDefinition>["execute"]>> {
+    const { params, signal, onUpdate, ctx, toolCallId, gateKey, config } = opts;
+    if (!ctx.hasUI) {
+      throw new Error(`Unsandboxed run of '${gateKey}' denied (no UI to prompt).`);
+    }
+    const options = [
+      "deny",
+      "allow once",
+      `always allow ${gateKey} this session`,
+      ...(deps.ctx.isProjectTrusted() ? [`always allow ${gateKey} for this project`] : []),
+      `always allow ${gateKey} globally`,
+    ];
+    // The dialog below blocks mid-turn — agent_settled won't fire while it's
+    // up, so the gate rings for itself (same pattern as ask/plan_submit).
+    deps.bell?.();
+    const choice = await ctx.ui.select(params.command, options);
+    if (!choice || choice === "deny") {
+      throw new Error(`Unsandboxed run of '${gateKey}' denied by user.`);
+    } else if (choice === "allow once") {
+      // nothing to store
+    } else if (choice.includes("this session")) {
+      sessionAllow.add(gateKey);
+      deps.ui.setStatus("sandbox", statusText(config, sessionAllow.size));
+    } else if (choice.includes("for this project")) {
+      await deps.persistProject?.(gateKey);
+    } else if (choice.includes("globally")) {
+      await deps.persistGlobal?.(gateKey);
+    }
+
+    return rawExecute(toolCallId, params, signal, onUpdate, ctx);
+  }
+
+  /** Turn a classifier failure into the configured fallback; never runs raw. */
+  async function applyAutoFallback(opts: {
+    params: { command: string; timeout?: number };
+    signal: AbortSignal | undefined;
+    onUpdate: Parameters<ReturnType<typeof createBashToolDefinition>["execute"]>[3];
+    ctx: ExtensionContext;
+    toolCallId: string;
+    gateKey: string;
+    config: SandboxConfig;
+    reason: string;
+  }): Promise<ReturnType<ReturnType<typeof createBashToolDefinition>["execute"]>> {
+    const { params, signal, onUpdate, ctx, toolCallId, gateKey, config, reason } = opts;
+    const fallback = config.autoMode?.fallback ?? "prompt";
+    if (fallback === "sandbox") {
+      // Re-run confined instead of throwing; the sandbox is the real boundary.
+      const t = createBashToolDefinition(ctx.cwd ?? fallbackCwd, {
+        operations: createSandboxedOperations(landstripPolicy(config)),
+      });
+      const result = await t.execute(toolCallId, params as never, signal, onUpdate, ctx);
+      result.content = [
+        { type: "text", text: "Sandbox classifier unavailable; ran sandboxed instead.\n" },
+        ...result.content,
+      ];
+      return result;
+    }
+    if (fallback === "deny") {
+      throw new Error(
+        `Unsandboxed run of '${gateKey}' denied (sandbox classifier unavailable: ${reason}).`,
+      );
+    }
+    // "prompt" — headless can't prompt, so deny.
+    if (!ctx.hasUI) {
+      throw new Error(
+        `Unsandboxed run of '${gateKey}' denied (no UI, sandbox classifier unavailable: ${reason}).`,
+      );
+    }
+    return adjudicateMenu({ params, signal, onUpdate, ctx, toolCallId, gateKey, config });
+  }
+
+  /** Auto mode: one classifier call per gated request. Never persists grants. */
+  async function adjudicateAuto(opts: {
+    params: { command: string; timeout?: number };
+    signal: AbortSignal | undefined;
+    onUpdate: Parameters<ReturnType<typeof createBashToolDefinition>["execute"]>[3];
+    ctx: ExtensionContext;
+    toolCallId: string;
+    cwd: string;
+    config: SandboxConfig;
+    gateKey: string;
+  }): Promise<ReturnType<ReturnType<typeof createBashToolDefinition>["execute"]>> {
+    const { params, signal, onUpdate, ctx, toolCallId, cwd, config, gateKey } = opts;
+    const am = config.autoMode ?? {};
+
+    let client: ClassifierClient;
+    if (deps.classifier) {
+      client = deps.classifier;
+    } else {
+      const registry = (ctx as ExtensionContext).modelRegistry;
+      if (!registry) {
+        return applyAutoFallback({
+          params, signal, onUpdate, ctx, toolCallId, gateKey, config,
+          reason: "no model registry available",
+        });
+      }
+      client = createModelRegistryClassifier({
+        modelId: am.model ?? DEFAULT_AUTO_MODEL,
+        maxTokens: am.maxTokens ?? 256,
+        timeoutMs: am.timeoutMs ?? 20000,
+      })(registry, cwd);
+    }
+
+    const systemPrompt = resolveSystemPrompt(am.systemPromptFile, cwd, __dirname);
+
+    let messages;
+    try {
+      messages = buildClassifierThread(
+        (ctx as ExtensionContext).sessionManager?.buildContextEntries?.() ?? [],
+        params.command,
+        { maxChars: am.maxTranscriptChars ?? 64000, cwd },
+      );
+    } catch (err) {
+      return applyAutoFallback({
+        params, signal, onUpdate, ctx, toolCallId, gateKey, config,
+        reason: `failed to build classifier context: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+
+    const setWorking = (text?: string) => {
+      try {
+        (ctx as ExtensionContext).ui?.setWorkingMessage?.(text);
+      } catch {
+        /* UI best-effort */
+      }
+    };
+    setWorking("classifying…");
+
+    let verdict;
+    try {
+      verdict = await client.classify(
+        { systemPrompt, messages, targetCommand: params.command },
+        { signal },
+      );
+    } catch (err) {
+      return applyAutoFallback({
+        params, signal, onUpdate, ctx, toolCallId, gateKey, config,
+        reason: `classifier call failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setWorking(undefined);
+    }
+
+    if (!verdict || typeof verdict.approved !== "boolean") {
+      return applyAutoFallback({
+        params, signal, onUpdate, ctx, toolCallId, gateKey, config,
+        reason: "classifier returned an invalid verdict",
+      });
+    }
+
+    // Audit trail (in-memory, session-scoped). Classifier decisions never
+    // touch sessionAllow or persisted config — no "always allow" in auto mode.
+    classifierLog.push({
+      timestamp: Date.now(),
+      command: params.command,
+      verdict: verdict.approved ? "approved" : "denied",
+      reason: verdict.reason,
+      model: am.model ?? DEFAULT_AUTO_MODEL,
+      usage: verdict.usage,
+    });
+    deps.ui.setStatus("sandbox", statusText(config, sessionAllow.size));
+
+    if (verdict.approved) {
+      const result = await rawExecute(toolCallId, params, signal, onUpdate, ctx);
+      if (verdict.usage) {
+        return { ...result, usage: addUsage(result.usage, verdict.usage) };
+      }
+      return result;
+    }
+
+    throw new Error(
+      `Unsandboxed run of '${gateKey}' denied by classifier: ${verdict.reason ?? "no reason given"}`,
+    );
+  }
+
+  /**
+   * The single adjudication point for `sandbox:false`.
+   *
+   * Parser-gated: only provably-simple, non-interpreter, allowlisted commands
+   * run raw silently. Compound / `cd`-wrapped / interpreter / unlisted requests
+   * always reach adjudication (menu or classifier).
+   */
   async function runGatedRaw(
     params: { command: string; timeout?: number },
     signal: AbortSignal | undefined,
@@ -443,41 +694,38 @@ export function makeSandboxTool(
     ctx: ExtensionContext,
     toolCallId: string,
   ) {
-    const argv0 = extractArgv0(params.command);
-    const config = effectiveConfig(ctx.cwd ?? fallbackCwd);
+    const cwd = ctx.cwd ?? fallbackCwd;
+    const config = effectiveConfig(cwd);
+    const am = config.autoMode ?? {};
+    const autoEnabled = am.enabled === true;
+    const interpreterSet = new Set(am.interpreterPrograms ?? DEFAULT_INTERPRETER_PROGRAMS);
+    const parsed = parseEscalationRequest(params.command, interpreterSet);
+    // The gate key is the peeled remainder's argv0 — `cd X && git status` keys
+    // on `git`, never `cd`. Bare `cd`/pure-env remainders have no argv0, so
+    // they can never silent-allow; fall back to the legacy extractArgv0 for
+    // menu display only.
+    const gateKey = parsed.argv0 ?? extractArgv0(params.command);
     const listed =
-      sessionAllow.has(argv0) || (config.unsandboxedAllow ?? []).includes(argv0);
+      !!gateKey && (sessionAllow.has(gateKey) || (config.unsandboxedAllow ?? []).includes(gateKey));
 
-    if (!listed) {
-      if (!ctx.hasUI) {
-        throw new Error(`Unsandboxed run of '${argv0}' denied (no UI to prompt).`);
-      }
-      const options = [
-        "deny",
-        "allow once",
-        `always allow ${argv0} this session`,
-        ...(deps.ctx.isProjectTrusted() ? [`always allow ${argv0} for this project`] : []),
-        `always allow ${argv0} globally`,
-      ];
-      // The dialog below blocks mid-turn — agent_settled won't fire while it's
-      // up, so the gate rings for itself (same pattern as ask/plan_submit).
-      deps.bell?.();
-      const choice = await ctx.ui.select(params.command, options);
-      if (!choice || choice === "deny") {
-        throw new Error(`Unsandboxed run of '${argv0}' denied by user.`);
-      } else if (choice === "allow once") {
-        // nothing to store
-      } else if (choice.includes("this session")) {
-        sessionAllow.add(argv0);
-        deps.ui.setStatus("sandbox", `sandbox:on (${sessionAllow.size} raw)`);
-      } else if (choice.includes("for this project")) {
-        await deps.persistProject?.(argv0);
-      } else if (choice.includes("globally")) {
-        await deps.persistGlobal?.(argv0);
-      }
+    const silentRaw =
+      parsed.simple &&
+      !!parsed.argv0 &&
+      !parsed.interpreter &&
+      listed &&
+      !(autoEnabled && am.bypassAllowlist === true);
+
+    if (silentRaw) {
+      return rawExecute(toolCallId, params, signal, onUpdate, ctx);
     }
 
-    return rawExecute(toolCallId, params, signal, onUpdate, ctx);
+    if (autoEnabled) {
+      return adjudicateAuto({
+        params, signal, onUpdate, ctx, toolCallId, cwd, config, gateKey,
+      });
+    }
+
+    return adjudicateMenu({ params, signal, onUpdate, ctx, toolCallId, gateKey, config });
   }
 
   return tool;
@@ -512,6 +760,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   const sessionAllow = new Set<string>();
+  const classifierLog: ClassifiedRun[] = [];
   let ctxRef: ExtensionContext | undefined;
 
   const persist = (which: "project" | "global") => async (argv0: string) => {
@@ -536,6 +785,16 @@ export default function (pi: ExtensionAPI) {
 
   function updateStatus(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
+    const { config } = loadConfig({ cwd: ctx.cwd, trusted: ctx.isProjectTrusted() });
+    const am = config.autoMode;
+    if (am?.enabled) {
+      const modelShort = (am.model ?? DEFAULT_AUTO_MODEL).split("/").pop() ?? DEFAULT_AUTO_MODEL;
+      ctx.ui.setStatus(
+        "sandbox",
+        `sandbox:auto (${modelShort})` + (sessionAllow.size ? ` (${sessionAllow.size} raw)` : ""),
+      );
+      return;
+    }
     ctx.ui.setStatus(
       "sandbox",
       sessionAllow.size ? `sandbox:on (${sessionAllow.size} raw)` : "sandbox:on",
@@ -551,6 +810,7 @@ export default function (pi: ExtensionAPI) {
         cwd: process.cwd(),
       },
       sessionAllow,
+      classifierLog,
       persistProject: persist("project"),
       persistGlobal: persist("global"),
       bell: ringBell,
@@ -558,7 +818,7 @@ export default function (pi: ExtensionAPI) {
   );
 
   pi.registerCommand("sandbox", {
-    description: "Show sandbox status and effective policy",
+    description: "Show sandbox status, effective policy, and recent classifier verdicts",
     handler: async (_args, ctx) => {
       let doctor = "unavailable";
       try {
@@ -568,12 +828,22 @@ export default function (pi: ExtensionAPI) {
         doctor = String(e);
       }
       const { config } = loadConfig({ cwd: ctx.cwd, trusted: ctx.isProjectTrusted() });
+      const am = config.autoMode ?? {};
+      const recent = classifierLog.slice(-5).map((r) =>
+        `${new Date(r.timestamp).toISOString()} ${r.verdict} ${r.command}` +
+        (r.reason ? ` — ${r.reason}` : ""),
+      );
       ctx.ui.notify(
         [
           `active: yes (platform ${process.platform})`,
           `binary: ${binaryPath()}`,
           `doctor: ${doctor}`,
+          `auto mode: ${am.enabled ? `enabled (model ${am.model ?? DEFAULT_AUTO_MODEL}, fallback ${am.fallback ?? "prompt"}, maxTokens ${am.maxTokens ?? 256}, timeoutMs ${am.timeoutMs ?? 20000})` : "disabled"}`,
+          `bypass allowlist in auto mode: ${am.bypassAllowlist === true}`,
           `session unsandboxed: ${[...sessionAllow].join(", ") || "(none)"}`,
+          ...(classifierLog.length
+            ? [`classifier runs (last ${Math.min(5, classifierLog.length)}):`, ...recent]
+            : ["classifier runs: (none)"]),
           `policy: ${JSON.stringify(landstripPolicy(config))}`,
         ].join("\n"),
         "info",

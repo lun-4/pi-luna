@@ -44,9 +44,14 @@ Notes:
 
 - `src/` — extension source: `index.ts` (dynamic loader) and `parts/`
   (one file per sub-extension, plus support: `rpc-process.ts`,
-  `agents-overlay.ts`, `sandbox.json` base policy)
+  `agents-overlay.ts`, `sandbox.json` base policy, `command-parser.ts`
+  (single-command gate parser), `classifier.ts` + `classifier-prompt.md`
+  (auto-mode escalation classifier))
 - `test/` — vitest suites, one per part plus
   `integration.test.ts` (spawns the real landstrip binary)
+- `benchmarks/classifier/` — malicious-agent corpus (`corpus/*.json`),
+  `candidate-prompts/`, `RESULTS.md` + `RESULTS.csv` (see
+  `test/benchmark-classifier.test.ts`)
 - `scripts/` — manual smoke/probe scripts
 - root markdown — design docs (`plan_mode.md`, `sandboxing_plan.md`,
   `subagent_architecture.md`, `subagent_ui.md`, `TODO.md`)

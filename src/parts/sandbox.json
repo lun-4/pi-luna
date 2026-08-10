@@ -1,6 +1,33 @@
 {
   "enabled": true,
   "unsandboxedAllow": [],
+  "autoMode": {
+    "enabled": false,
+    "model": "deepseek/deepseek-v4-flash-0731",
+    "maxTokens": 256,
+    "timeoutMs": 20000,
+    "fallback": "prompt",
+    "maxTranscriptChars": 64000,
+    "bypassAllowlist": false,
+    "systemPromptFile": "classifier-prompt.md",
+    "interpreterPrograms": [
+      "node",
+      "python",
+      "python3",
+      "bash",
+      "sh",
+      "zsh",
+      "perl",
+      "ruby",
+      "php",
+      "lua",
+      "deno",
+      "bun",
+      "pwsh",
+      "powershell",
+      "awk"
+    ]
+  },
   "shell": { "readAccess": "host" },
   "network": {
     "allowNetwork": true,
