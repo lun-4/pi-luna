@@ -10,14 +10,14 @@
  * exercise the sandboxed tests for real.
  */
 import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, readFileSync } from "node:fs";
+import { tempDir } from "./temp.js";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { binaryPath } from "@landstrip/landstrip";
 import {
-  makeSandboxTool,
+  makeSandboxTool as makeSandboxToolImpl,
   landstripPolicy,
   type SandboxUI,
 } from "../src/parts/sandbox.js";
@@ -25,15 +25,24 @@ import type { ClassifierClient, ClassifierRequest, ClassifierVerdict } from "../
 import { CLASSIFIER_TOOL_NAME } from "../src/parts/classifier.js";
 
 const cwd = process.cwd();
-const home = mkdtempSync(join(tmpdir(), "luna-home-"));
+const home = tempDir("luna-home-");
 const here = dirname(fileURLToPath(import.meta.url));
+// Existing classifier fixtures predate session activation; keep them explicitly
+// in Auto while production defaults to the live modes state.
+function makeSandboxTool(...args: Parameters<typeof makeSandboxToolImpl>): ReturnType<typeof makeSandboxToolImpl> {
+  const [fallback, deps] = args;
+  return makeSandboxToolImpl(fallback, {
+    ...deps,
+    mode: deps.mode ?? (() => deps.config?.autoMode?.enabled === true ? "auto" : "build"),
+  });
+}
 
 // Probe synchronously at module load: skipIf/runIf conditions are evaluated
 // at collection time, before any beforeAll hook runs.
 // Uses the *actual* bundled base policy and the exact production invocation —
 // anything less faithfully reproduces what execute() does.
 function probeSandbox(): { available: boolean; diag: string } {
-  const dir = mkdtempSync(join(tmpdir(), "luna-probe-"));
+  const dir = tempDir("luna-probe-");
   const pol = join(dir, "p.json");
   const base = JSON.parse(readFileSync(join(here, "..", "src", "parts", "sandbox.json"), "utf8"));
   writeFileSync(pol, JSON.stringify(landstripPolicy(base)));

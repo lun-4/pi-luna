@@ -4,9 +4,7 @@ Goal: bring Claude Code's build/plan mode toggle to pi, plus the priming it
 needs — an `ask` tool and a `plan_submit` tool — without subagents. Two parts,
 one UX bump.
 
-- **Shift+Tab** toggles **Build mode** (default) ↔ **Plan mode**, shown in the
-  footer as `mode: build` / `mode: plan` (mirroring the `sandbox:on` status
-  line style).
+- **Shift+Tab** cycles **Build** → **Build (auto mode)** → **Plan** when Auto is configured, or Build ↔ Plan otherwise. The footer shows `mode: build`, `mode: build (auto mode)`, and `mode: plan`.
 - **Plan mode** exposes read tools (`read`, `grep`, `find`, `ls`), the new
   `ask` tool, `plan_submit`, and — **only to the single plan file** — the
   built-in `write`/`edit` tools. No bash, no other writes. The system prompt
@@ -45,7 +43,7 @@ one UX bump.
   config).
 - **`ask` is active in both modes**; `plan_submit` only exists in plan mode.
 - **Mode state is in-memory, per session** — resets to build on
-  `session_start` (new/resume/fork/reload). Persisting the mode across
+  `session_start`; `autoMode.enabled` only configures Auto availability, while selecting Auto activates it for that session. (new/resume/fork/reload). Persisting the mode across
   sessions is out of scope. The plan *files* however persist on disk.
 - **Entering plan mode does not abort the in-flight turn.** The round-trip
   already sent its toolset; that turn finishes, and the plan toolset applies

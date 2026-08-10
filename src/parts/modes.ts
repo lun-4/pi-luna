@@ -50,12 +50,34 @@ import { Type, type Static } from "typebox";
 // Type-only: the runtime import of subagents.ts lives in subagents.ts itself
 // (it imports getMode/subagentTypesFor from here) — no runtime cycle.
 import type { SubagentType } from "./subagents.ts";
+import { loadConfig } from "./sandbox-config.ts";
+import { getMode as readMode, setCurrentMode, type Mode } from "./mode-state.ts";
+export type { Mode } from "./mode-state.ts";
 
 // ---------------------------------------------------------------------------
 // Types & state
 // ---------------------------------------------------------------------------
 
-export type Mode = "build" | "plan";
+export function autoModeAvailable(config: { autoMode?: { enabled?: boolean } }): boolean {
+  return config.autoMode?.enabled === true;
+}
+
+export function nextMode(mode: Mode, autoAvailable: boolean): Mode {
+  if (!autoAvailable) return mode === "plan" ? "build" : "plan";
+  return mode === "build" ? "auto" : mode === "auto" ? "plan" : "build";
+}
+export function modeLabel(mode: Mode): string {
+  return mode === "auto" ? "mode: build (auto mode)" : `mode: ${mode}`;
+}
+
+/** Theme-aware footer label; semantic theme tokens keep custom themes working. */
+function styledModeLabel(ctx: ExtensionContext, mode: Mode): string {
+  const label = modeLabel(mode);
+  const fg = (ctx.ui as typeof ctx.ui & { theme?: { fg(name: string, text: string): string } }).theme?.fg;
+  if (!fg) return label;
+  const color = mode === "build" ? "bashMode" : mode === "auto" ? "warning" : "accent";
+  return fg.call((ctx.ui as any).theme, color, label);
+}
 
 /** Set by the factory; module-scope helpers (applyMode) need it. */
 let piRef: ExtensionAPI = undefined as unknown as ExtensionAPI;
@@ -64,6 +86,8 @@ export interface ModesState {
   mode: Mode;
   /** Active toolset captured at session_start (respects --tools/--exclude-tools). */
   buildTools: string[];
+  /** Whether Auto is configured and available this session. */
+  autoAvailable: boolean;
   /** Plan path after accept, before the /plan-accept handoff runs. */
   handoffPending: string | undefined;
   /** <cwd>/.pi/plans/<sessionId>.md */
@@ -81,11 +105,21 @@ const state: ModesState = {
   buildTools: [],
   handoffPending: undefined,
   planPath: undefined,
+  autoAvailable: true,
 };
 
 function updateStatus(ctx: ExtensionContext | undefined) {
   if (!ctx?.hasUI) return;
-  ctx.ui.setStatus("mode", `mode: ${state.mode}`);
+  ctx.ui.setStatus("mode", styledModeLabel(ctx, state.mode));
+  // Keep the sandbox footer in sync immediately when Auto is selected; the
+  // sandbox part also refreshes this status when it executes a gated command.
+  if (state.mode === "auto") {
+    const cfg = loadConfig({ cwd: ctx.cwd, trusted: typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(), baseDir: __dirname }).config;
+    const model = (cfg.autoMode?.model ?? "deepseek/deepseek-v4-flash-0731").split("/").pop();
+    ctx.ui.setStatus("sandbox", `sandbox:auto (${model})`);
+  } else {
+    ctx.ui.setStatus("sandbox", "sandbox:on");
+  }
 }
 
 function applyMode(ctx: ExtensionContext) {
@@ -96,11 +130,14 @@ function applyMode(ctx: ExtensionContext) {
 function setMode(next: Mode, ctx: ExtensionContext) {
   if (state.mode === next) return;
   state.mode = next;
+  setCurrentMode(next);
   applyMode(ctx);
   ctx.ui.notify(
     next === "plan"
       ? "Plan mode — read tools + plan file only. Shift+Tab or /build to exit."
-      : "Build mode — full toolset restored.",
+      : next === "auto"
+        ? "Auto mode — Build tools with sandbox escalations classified."
+        : "Build mode — full toolset restored.",
     "info",
   );
 }
@@ -108,7 +145,7 @@ function setMode(next: Mode, ctx: ExtensionContext) {
 /** The current mode (build | plan). Imported by other parts, e.g. the
  *  subagents gate. */
 export function getMode(): Mode {
-  return state.mode;
+  return readMode();
 }
 
 /** Which subagent types a mode may spawn. Plan mode is read-only research;
@@ -116,6 +153,7 @@ export function getMode(): Mode {
  *  run in the executing session too). */
 export const SUBAGENT_TYPES_PER_MODE: Record<Mode, readonly SubagentType[]> = {
   build: ["general-purpose", "explore", "plan-reviewer"],
+  auto: ["general-purpose", "explore", "plan-reviewer"],
   plan: ["explore", "plan-reviewer"],
 };
 
@@ -219,7 +257,7 @@ export function allowPlanWrite(
 
 /** The toolset for a mode. Plan intersects the strict set with what's registered. */
 export function toolListFor(mode: Mode, buildTools: string[]): string[] {
-  if (mode === "build") {
+  if (mode === "build" || mode === "auto") {
     // plan_submit is plan-only. pi auto-activates ALL registered extension
     // tools at session_start (includeAllExtensionTools), so it leaks into
     // buildTools and thus into build mode unless we strip it — and its
@@ -251,7 +289,7 @@ export function planModeGate(
   if (state.handoffPending) {
     return { block: true, reason: "Plan accepted — new session starting" };
   }
-  if (state.mode === "build") {
+  if (state.mode === "build" || state.mode === "auto") {
     if (toolName === "plan_submit") {
       return { block: true, reason: "plan_submit is only available in plan mode" };
     }
@@ -357,8 +395,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_e, ctx) => {
     state.mode = "build";
+    setCurrentMode("build");
     state.handoffPending = undefined;
     state.buildTools = pi.getActiveTools();
+    const trusted = typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : false;
+    const sandbox = loadConfig({ cwd: ctx.cwd, trusted, baseDir: __dirname }).config;
+    state.autoAvailable = autoModeAvailable(sandbox);
     const sessionId = ctx.sessionManager.getSessionId();
     state.planPath = path.join(ctx.cwd, CONFIG_DIR_NAME, "plans", `${sessionId}.md`);
     mkdirSync(path.dirname(state.planPath), { recursive: true });
@@ -606,6 +648,17 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("auto", {
+    description: "Enter Auto mode for this session when configured",
+    handler: async (_args, ctx) => {
+      if (!state.autoAvailable) {
+        ctx.ui.notify("Auto mode is unavailable: enable autoMode.enabled in sandbox settings.", "info");
+        return;
+      }
+      setMode("auto", ctx);
+    },
+  });
+
   pi.registerCommand("build", {
     description: "Return to build mode (full toolset)",
     handler: async (_args, ctx) => {
@@ -616,9 +669,9 @@ export default function (pi: ExtensionAPI) {
   // -- shortcut ------------------------------------------------------------------
 
   pi.registerShortcut("shift+tab", {
-    description: "Toggle build/plan mode",
+    description: "Cycle build/auto/plan mode",
     handler: async (ctx) => {
-      setMode(state.mode === "build" ? "plan" : "build", ctx);
+      setMode(nextMode(state.mode, state.autoAvailable), ctx);
     },
   });
 

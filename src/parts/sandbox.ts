@@ -50,7 +50,14 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { binaryPath } from "@landstrip/landstrip";
+import { Text, type Component } from "@earendil-works/pi-tui";
 import { ringBell } from "./bell.ts";
+import { getMode, type Mode } from "./mode-state.ts";
+import {
+  loadConfig, mergeTiers, type LoadOpts, type SandboxAutoModeConfig, type SandboxConfig,
+} from "./sandbox-config.ts";
+export { loadConfig, mergeTiers } from "./sandbox-config.ts";
+export type { LoadOpts, SandboxAutoModeConfig, SandboxConfig } from "./sandbox-config.ts";
 import {
   parseEscalationRequest,
   DEFAULT_INTERPRETER_PROGRAMS,
@@ -64,7 +71,7 @@ import {
   type ClassifierClient,
 } from "./classifier.ts";
 import { spawn, execFile } from "node:child_process";
-import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
@@ -78,35 +85,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-export interface SandboxAutoModeConfig {
-  enabled?: boolean;
-  model?: string;
-  maxTokens?: number;
-  timeoutMs?: number;
-  /** What happens when the classifier can't run or declines to commit. */
-  fallback?: "prompt" | "deny" | "sandbox";
-  maxTranscriptChars?: number;
-  /** true ⇒ even parsed-simple allowlisted commands go to the classifier. */
-  bypassAllowlist?: boolean;
-  systemPromptFile?: string;
-  interpreterPrograms?: string[];
-}
-
-export interface SandboxConfig {
-  enabled?: boolean;
-  unsandboxedAllow?: string[];
-  autoMode?: SandboxAutoModeConfig;
-  shell?: Record<string, unknown>;
-  network?: Record<string, unknown>;
-  filesystem?: {
-    denyRead?: string[];
-    allowRead?: string[];
-    allowWrite?: string[];
-    denyWrite?: string[];
-  };
-  [key: string]: unknown;
-}
 
 /** Default model id as catalogued under the openrouter provider. */
 export const DEFAULT_AUTO_MODEL = "deepseek/deepseek-v4-flash-0731";
@@ -221,62 +199,10 @@ export function formatDenials(traps: Trap[]): string | undefined {
   ].join("\n");
 }
 
-// ---------------------------------------------------------------------------
-// Config loading / merging
-// ---------------------------------------------------------------------------
-
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-function mergeTwo(a: SandboxConfig, b: SandboxConfig): SandboxConfig {
-  const out: SandboxConfig = { ...a };
-  for (const [k, v] of Object.entries(b)) {
-    const av = out[k];
-    if (Array.isArray(av) && Array.isArray(v)) out[k] = [...av, ...v];
-    else if (isPlainObject(av) && isPlainObject(v)) out[k] = mergeTwo(av, v as SandboxConfig);
-    else out[k] = v;
-  }
-  return out;
-}
-
-export function mergeTiers(tiers: (SandboxConfig | undefined)[]): SandboxConfig {
-  let out: SandboxConfig = {};
-  for (const t of tiers) if (t) out = mergeTwo(out, t);
-  return out;
-}
-
 /** Strip pi-luna-only keys before handing the policy to landstrip. */
 export function landstripPolicy(cfg: SandboxConfig): Record<string, unknown> {
   const { enabled: _e, unsandboxedAllow: _u, autoMode: _a, ...rest } = cfg;
   return rest;
-}
-
-export interface LoadOpts {
-  baseDir?: string;   // dir containing bundled sandbox.json
-  homeDir?: string;   // for ~
-  cwd: string;
-  trusted: boolean;
-}
-
-function readJsonIfExists(path: string): SandboxConfig | undefined {
-  try {
-    if (!existsSync(path)) return undefined;
-    return JSON.parse(readFileSync(path, "utf8")) as SandboxConfig;
-  } catch {
-    return undefined;
-  }
-}
-
-export function loadConfig(opts: LoadOpts): { config: SandboxConfig } {
-  const home = opts.homeDir ?? homedir();
-  const base = readJsonIfExists(join(opts.baseDir ?? __dirname, "sandbox.json"));
-  // NOTE: deliberately NOT ~/.pi/agent/sandbox.json — pi-landstrip owns that.
-  const global = readJsonIfExists(join(home, ".pi", "agent", "luna-sandbox.json"));
-  const project = opts.trusted
-    ? readJsonIfExists(join(opts.cwd, ".pi", "sandbox.json"))
-    : undefined;
-  return { config: mergeTiers([base, global, project]) };
 }
 
 // ---------------------------------------------------------------------------
@@ -406,8 +332,12 @@ export interface SandboxToolDeps {
   homeDir?: string;
   /** Test seam: inject a fake classifier; otherwise built lazily from ctx.modelRegistry. */
   classifier?: ClassifierClient;
+  /** Live session mode; Auto is activated only when this returns auto. */
+  mode?: () => Mode;
   /** Session-scoped audit trail of auto-mode decisions (shared with /sandbox). */
   classifierLog?: ClassifiedRun[];
+  /** Transcript seam for classifier decisions. */
+  appendEntry?: (type: string, data: unknown) => void;
   /**
    * Ring the terminal bell (\a) to get luna's attention before the approval
    * dialog blocks. Optional so minimal test constructions keep compiling;
@@ -422,6 +352,7 @@ export function makeSandboxTool(
 ): ToolDefinition<typeof schema, BashToolDetails | undefined, unknown> {
   const sessionAllow = deps.sessionAllow ?? new Set<string>();
   const classifierLog = deps.classifierLog ?? ([] as ClassifiedRun[]);
+  const modeReader = deps.mode ?? getMode;
 
   function effectiveConfig(cwd: string): SandboxConfig {
     const { config } = loadConfig({
@@ -489,7 +420,7 @@ export function makeSandboxTool(
   /** Footer status text reflecting auto mode + session raw grants. */
   function statusText(config: SandboxConfig, rawCount: number): string {
     const am = config.autoMode;
-    if (am?.enabled) {
+    if (am?.enabled && modeReader() === "auto") {
       const modelShort = (am.model ?? DEFAULT_AUTO_MODEL).split("/").pop() ?? DEFAULT_AUTO_MODEL;
       return `sandbox:auto (${modelShort})` + (rawCount ? ` (${rawCount} raw)` : "");
     }
@@ -657,14 +588,16 @@ export function makeSandboxTool(
 
     // Audit trail (in-memory, session-scoped). Classifier decisions never
     // touch sessionAllow or persisted config — no "always allow" in auto mode.
-    classifierLog.push({
+    const decision: ClassifiedRun = {
       timestamp: Date.now(),
       command: params.command,
       verdict: verdict.approved ? "approved" : "denied",
       reason: verdict.reason,
       model: am.model ?? DEFAULT_AUTO_MODEL,
       usage: verdict.usage,
-    });
+    };
+    classifierLog.push(decision);
+    deps.appendEntry?.("sandbox-classifier", decision);
     deps.ui.setStatus("sandbox", statusText(config, sessionAllow.size));
 
     if (verdict.approved) {
@@ -697,7 +630,7 @@ export function makeSandboxTool(
     const cwd = ctx.cwd ?? fallbackCwd;
     const config = effectiveConfig(cwd);
     const am = config.autoMode ?? {};
-    const autoEnabled = am.enabled === true;
+    const autoEnabled = am.enabled === true && modeReader() === "auto";
     const interpreterSet = new Set(am.interpreterPrograms ?? DEFAULT_INTERPRETER_PROGRAMS);
     const parsed = parseEscalationRequest(params.command, interpreterSet);
     // The gate key is the peeled remainder's argv0 — `cd X && git status` keys
@@ -787,7 +720,7 @@ export default function (pi: ExtensionAPI) {
     if (!ctx.hasUI) return;
     const { config } = loadConfig({ cwd: ctx.cwd, trusted: ctx.isProjectTrusted() });
     const am = config.autoMode;
-    if (am?.enabled) {
+    if (am?.enabled && getMode() === "auto") {
       const modelShort = (am.model ?? DEFAULT_AUTO_MODEL).split("/").pop() ?? DEFAULT_AUTO_MODEL;
       ctx.ui.setStatus(
         "sandbox",
@@ -801,6 +734,21 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
+  pi.registerEntryRenderer(
+    "sandbox-classifier",
+    (entry, _options, theme): Component => {
+      const data = entry.data as ClassifiedRun;
+      const color = data.verdict === "approved" ? "success" : "error";
+      const result = data.verdict === "approved" ? "allowed" : "denied";
+      return new Text(
+        theme.fg(color, `Auto mode: ${result} unsandboxed bash — ${data.command}`) +
+          (data.reason ? ` (${data.reason})` : ""),
+        1,
+        0,
+      );
+    },
+  );
+
   pi.registerTool(
     makeSandboxTool(process.cwd(), {
       ui: { select: (t, o) => ctxRef!.ui.select(t, o), setStatus: (k, v) => ctxRef?.ui.setStatus(k, v) },
@@ -811,6 +759,8 @@ export default function (pi: ExtensionAPI) {
       },
       sessionAllow,
       classifierLog,
+      appendEntry: (type, data) => pi.appendEntry(type, data),
+      mode: getMode,
       persistProject: persist("project"),
       persistGlobal: persist("global"),
       bell: ringBell,
@@ -838,8 +788,7 @@ export default function (pi: ExtensionAPI) {
           `active: yes (platform ${process.platform})`,
           `binary: ${binaryPath()}`,
           `doctor: ${doctor}`,
-          `auto mode: ${am.enabled ? `enabled (model ${am.model ?? DEFAULT_AUTO_MODEL}, fallback ${am.fallback ?? "prompt"}, maxTokens ${am.maxTokens ?? 256}, timeoutMs ${am.timeoutMs ?? 20000})` : "disabled"}`,
-          `bypass allowlist in auto mode: ${am.bypassAllowlist === true}`,
+          `auto mode: ${am.enabled ? `available (active: ${getMode() === "auto"}, model ${am.model ?? DEFAULT_AUTO_MODEL}, fallback ${am.fallback ?? "prompt"}, maxTokens ${am.maxTokens ?? 256}, timeoutMs ${am.timeoutMs ?? 20000})` : "disabled"}`,          `bypass allowlist in auto mode: ${am.bypassAllowlist === true}`,
           `session unsandboxed: ${[...sessionAllow].join(", ") || "(none)"}`,
           ...(classifierLog.length
             ? [`classifier runs (last ${Math.min(5, classifierLog.length)}):`, ...recent]

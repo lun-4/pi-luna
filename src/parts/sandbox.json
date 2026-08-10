@@ -2,7 +2,7 @@
   "enabled": true,
   "unsandboxedAllow": [],
   "autoMode": {
-    "enabled": false,
+    "enabled": true,
     "model": "deepseek/deepseek-v4-flash-0731",
     "maxTokens": 256,
     "timeoutMs": 20000,

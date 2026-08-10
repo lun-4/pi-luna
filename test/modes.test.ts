@@ -3,9 +3,9 @@
  * flow through a fake ModeUI seam. Runs anywhere (no TUI, no session).
  */
 import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tempDir } from "./temp.js";
 import { dirname, isAbsolute, join } from "node:path";
 import {
   PLAN_PROMPT_TEMPLATE,
@@ -13,6 +13,9 @@ import {
   PLAN_SPEC_PATH,
   PLAN_TOOLS,
   allowPlanWrite,
+  autoModeAvailable,
+  modeLabel,
+  nextMode,
   buildAcceptKickoff,
   decideReview,
   getMode,
@@ -63,10 +66,31 @@ describe("allowPlanWrite", () => {
   });
 });
 
+describe("auto mode cycle", () => {
+  it("configured availability requires explicit enabled true", () => {
+    expect(autoModeAvailable({ autoMode: { enabled: true } })).toBe(true);
+    expect(autoModeAvailable({ autoMode: { enabled: false } })).toBe(false);
+    expect(autoModeAvailable({})).toBe(false);
+  });
+  it("cycles build → auto → plan → build when available", () => {
+    expect(nextMode("build", true)).toBe("auto");
+    expect(nextMode("auto", true)).toBe("plan");
+    expect(nextMode("plan", true)).toBe("build");
+    expect(modeLabel("auto")).toBe("mode: build (auto mode)");
+  });
+  it("skips auto when unavailable", () => {
+    expect(nextMode("build", false)).toBe("plan");
+    expect(nextMode("plan", false)).toBe("build");
+  });
+});
+
 describe("toolListFor", () => {
   const buildTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
   it("build returns the captured set", () => {
     expect(toolListFor("build", buildTools)).toEqual(buildTools);
+  });
+  it("auto has the same toolset as build", () => {
+    expect(toolListFor("auto", [...buildTools, "plan_submit"])).toEqual(buildTools);
   });
   it("build strips plan_submit but keeps ask (both-modes tool)", () => {
     // pi auto-activates all extension tools at session_start, so plan_submit
@@ -97,6 +121,11 @@ describe("toolListFor", () => {
 });
 
 describe("planModeGate", () => {
+  it("auto mode passes everything except plan_submit", () => {
+    expect(planModeGate({ ...buildState, mode: "auto" }, "bash", {}, cwd)).toEqual({ block: false });
+    expect(planModeGate({ ...buildState, mode: "auto" }, "plan_submit", {}, cwd).block).toBe(true);
+  });
+
   it("build mode passes everything except plan_submit", () => {
     expect(planModeGate(buildState, "bash", {}, cwd)).toEqual({ block: false });
     expect(planModeGate(buildState, "write", { path: "src/x.ts" }, cwd)).toEqual({ block: false });
@@ -151,7 +180,7 @@ describe("planModeGate", () => {
 });
 
 describe("runSubmitFlow", () => {
-  const dir = mkdtempSync(join(tmpdir(), "luna-plans-"));
+  const dir = tempDir("luna-plans-");
   const file = join(dir, "plan.md");
   writeFileSync(file, "# Plan\n\n1. do the thing\n");
 
@@ -291,6 +320,7 @@ describe("subagent modes integration", () => {
     expect(getMode()).toBe("build");
     expect(subagentTypesFor("plan")).toEqual(["explore", "plan-reviewer"]);
     expect(subagentTypesFor("build")).toEqual(["general-purpose", "explore", "plan-reviewer"]);
+    expect(subagentTypesFor("auto")).toEqual(subagentTypesFor("build"));
   });
 });
 
@@ -424,6 +454,8 @@ function stubPi() {
   const handlers = new Map<string, Function[]>();
   const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
   const tools = new Map<string, any>();
+  const shortcuts = new Map<string, any>();
+  const statuses: [string, string | undefined][] = [];
   const sentUserMessages: { content: string; options?: unknown }[] = [];
   const pi: any = {
     on(event: string, h: Function) {
@@ -435,7 +467,9 @@ function stubPi() {
     registerCommand(name: string, opts: any) {
       commands.set(name, opts);
     },
-    registerShortcut() {},
+    registerShortcut(name: string, opts: any) {
+      shortcuts.set(name, opts);
+    },
     registerEntryRenderer() {},
     appendEntry() {},
     getActiveTools: () => ["read", "bash", "edit", "write", "grep", "find", "ls"],
@@ -444,17 +478,47 @@ function stubPi() {
       sentUserMessages.push({ content, options });
     },
   };
+  pi.ui = { setStatus(key: string, text: string | undefined) { statuses.push([key, text]); } };
+
   const emit = async (event: string, e: unknown, ctx: unknown) => {
     let last: unknown;
     for (const h of handlers.get(event) ?? []) last = await h(e, ctx);
     return last;
   };
-  return { pi, commands, tools, sentUserMessages, emit };
+  return { pi, commands, tools, shortcuts, statuses, sentUserMessages, emit };
 }
+
+describe("registered mode shortcut", () => {
+  it("cycles the live footer through all enabled labels", async () => {
+    const { default: modesFactory } = await import("../src/parts/modes.js");
+    const statuses: string[] = [];
+    const ctx: any = {
+      cwd: tempDir("luna-mode-cycle-"), hasUI: true,
+      isProjectTrusted: () => true,
+      sessionManager: { getSessionId: () => "cycle" },
+      ui: {
+        setStatus: (key: string, text?: string) => { if (key === "mode" && text) statuses.push(text); },
+        theme: { fg: (color: string, text: string) => `<${color}>${text}</${color}>` },
+        notify() {},
+      },
+    };
+    const fresh = stubPi();
+    modesFactory(fresh.pi);
+    await fresh.emit("session_start", {}, ctx);
+    const shortcut = fresh.shortcuts.get("shift+tab");
+    await shortcut.handler(ctx); await shortcut.handler(ctx); await shortcut.handler(ctx);
+    expect(statuses).toEqual([
+      "<bashMode>mode: build</bashMode>",
+      "<warning>mode: build (auto mode)</warning>",
+      "<accent>mode: plan</accent>",
+      "<bashMode>mode: build</bashMode>",
+    ]);
+  });
+});
 
 describe("accept handoff (bug: accept must /new + run, not message the old session)", () => {
   const setup = () => {
-    const dir = mkdtempSync(join(tmpdir(), "luna-handoff-"));
+    const dir = tempDir("luna-handoff-");
     const sessionId = "sess-handoff";
     const planPath = join(dir, ".pi", "plans", `${sessionId}.md`);
     mkdirSync(dirname(planPath), { recursive: true });

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { tempDir } from "./temp.js";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mergeTiers, landstripPolicy, loadConfig, type SandboxConfig } from "../src/parts/sandbox.js";
@@ -13,7 +13,7 @@ const base = JSON.parse(readFileSync(basePath, "utf8")) as SandboxConfig;
 
 describe("bundled base policy", () => {
   it("passes landstrip policy validate once unsandboxedAllow is stripped", () => {
-    const dir = mkdtempSync(join(tmpdir(), "luna-policy-"));
+    const dir = tempDir("luna-policy-");
     const f = join(dir, "policy.json");
     writeFileSync(f, JSON.stringify(landstripPolicy(base)));
     const out = execFileSync(binaryPath(), ["policy", "validate", "-p", f], { encoding: "utf8" });
@@ -55,8 +55,13 @@ describe("landstripPolicy", () => {
 });
 
 describe("loadConfig", () => {
+  it("defaults Auto availability on", () => {
+    const loaded = loadConfig({ baseDir: join(here, "..", "src", "parts"), homeDir: tempDir("luna-empty-home-"), cwd: "/tmp", trusted: false });
+    expect(loaded.config.autoMode?.enabled).toBe(true);
+  });
+
   it("loads base+global, skips project when untrusted, concatenates allow", () => {
-    const root = mkdtempSync(join(tmpdir(), "luna-cfg-"));
+    const root = tempDir("luna-cfg-");
     const home = join(root, "home");
     const proj = join(root, "proj");
     mkdirSync(join(home, ".pi", "agent"), { recursive: true });

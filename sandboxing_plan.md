@@ -3,7 +3,10 @@
 Goal: override pi's `bash` tool so every agent command runs inside a landstrip
 sandbox by default. The agent may explicitly request `sandbox: false`; that
 request is gated by an unsandboxed-program allowlist, falling back to a live
-prompt to luna when the program isn't listed.
+prompt to luna when the program isn't listed. Auto mode is a configured,
+session-selectable mode: `autoMode.enabled` makes it available, while choosing
+`mode: build (auto mode)` for the current session activates classifier routing.
+Ordinary Build mode never routes escalations to the classifier.
 
 Subagents are **out of scope**. Architecture leaves room for
 `prepareProcess`-based subagents later.
