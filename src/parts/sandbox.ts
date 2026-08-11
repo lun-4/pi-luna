@@ -70,6 +70,7 @@ import {
   type ClassifiedRun,
   type ClassifierClient,
 } from "./classifier.ts";
+import { serializedUI } from "./ui-queue.ts";
 import { spawn, execFile } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -451,7 +452,11 @@ export function makeSandboxTool(
     // The dialog below blocks mid-turn — agent_settled won't fire while it's
     // up, so the gate rings for itself (same pattern as ask/plan_submit).
     deps.bell?.();
-    const choice = await ctx.ui.select(params.command, options);
+    // Serialize through the shared queue: two parallel gated calls both
+    // reaching the menu must queue, not race (pi core has one modal slot and
+    // orphans the loser). ctx.ui is pi's raw extension context, so wrap it
+    // here; the module-wide tail is what sequences concurrent calls.
+    const choice = await serializedUI(ctx.ui).select(params.command, options, { signal });
     if (!choice || choice === "deny") {
       throw new Error(`Unsandboxed run of '${gateKey}' denied by user.`);
     } else if (choice === "allow once") {

@@ -270,6 +270,55 @@ describe("sandbox:false gate", () => {
     ).rejects.toThrow(/denied/i);
     expect(ui.calls).toHaveLength(0);
   });
+
+  it("two parallel gated calls queue their approval prompts instead of racing", async () => {
+    // This is the regression for the single-slot dialog bug: pi core only has
+    // one modal slot, so two concurrent approval prompts used to clobber each
+    // other and leave one tool call hanging forever. Wrapping the menu ui in
+    // serializedUI (as production does) must make them queue FIFO.
+    const order: string[] = [];
+    const releases: Array<() => void> = [];
+    let active = 0;
+    let maxActive = 0;
+    const gated: SandboxUI = {
+      async select(title: string) {
+        order.push(`open:${title}`);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((r) => releases.push(r));
+        active -= 1;
+        return "deny";
+      },
+      setStatus() {},
+    };
+    // Production passes pi's RAW ctx.ui to the gate, which serializes it
+    // internally via serializedUI(ctx.ui). Mirror that: ctx.ui is the raw ui.
+    const ctx = makeCtx(gated);
+    const tool = makeSandboxTool(cwd, { ui: gated, ctx, homeDir: home });
+
+    const run = (cmd: string) =>
+      tool.execute("p", { command: cmd, sandbox: false }, undefined, undefined, ctx as never);
+    const p1 = run("zzz-uno touch /tmp/x");
+    const p2 = run("zzz-duo touch /tmp/y");
+    // Observe both up front so their (expected) denials are never reported as
+    // unhandled while we drive the queue manually.
+    const r1 = p1.catch((e: unknown) => e);
+    const r2 = p2.catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Only the first prompt is up; the second waits.
+    expect(order).toEqual(["open:zzz-uno touch /tmp/x"]);
+    expect(maxActive).toBe(1);
+
+    releases[0]!();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(order).toEqual(["open:zzz-uno touch /tmp/x", "open:zzz-duo touch /tmp/y"]);
+    expect(maxActive).toBe(1); // never two modals at once
+
+    releases[1]!();
+    expect(await r1).toMatchObject({ message: expect.stringContaining("denied") });
+    expect(await r2).toMatchObject({ message: expect.stringContaining("denied") });
+  });
 });
 
 /** A fake classifier that records requests and returns a fixed verdict. */

@@ -26,6 +26,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Input, Key, matchesKey, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
+import { serializedUI } from "./ui-queue.ts";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -426,14 +427,17 @@ export default function (pi: ExtensionAPI) {
   const tool = makeAskTool({
     hasUI: () => ctxRef?.hasUI ?? false,
     bell: () => process.stdout.write("\x07"),
-    ui: {
+    // Serialize blocking dialogs through the shared queue so two parallel ask
+    // calls (or an ask racing the sandbox gate) queue instead of clobbering
+    // pi's single modal slot.
+    ui: serializedUI({
       select: (t, o) => ctxRef!.ui.select(t, o),
       input: (t, p) => ctxRef!.ui.input(t, p),
       custom: (f) => {
         if (!ctxRef?.ui.custom) throw new Error("ask: custom form requires TUI mode");
         return ctxRef.ui.custom(f);
       },
-    },
+    }),
   });
   // In RPC mode custom is absent on the seam; askForm falls back to dialogs.
   pi.registerTool(tool as never);
