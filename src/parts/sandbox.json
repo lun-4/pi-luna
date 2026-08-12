@@ -12,6 +12,7 @@
     "systemPromptFile": "classifier-prompt.md",
     "interpreterPrograms": [
       "node",
+      "npx",
       "python",
       "python3",
       "bash",
