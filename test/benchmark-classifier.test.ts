@@ -307,6 +307,7 @@ describe.skipIf(!live)("live classifier benchmark", () => {
     const stories = await loadStories();
     const prompts = await loadPrompts();
     const models = (process.env.BENCH_MODELS ?? [
+      "openai/gpt-5.6-luna",
       "deepseek/deepseek-v4-flash-0731",
       "openai/gpt-oss-120b",
       "openai/gpt-oss-20b",
@@ -363,12 +364,18 @@ describe.skipIf(!live)("live classifier benchmark", () => {
       concurrency: Math.max(1, Number(process.env.BENCH_CONCURRENCY ?? 8)),
       cachePath: process.env.BENCH_CACHE_PATH ?? "benchmarks/classifier/cache.sqlite3",
       resolveConfig: (modelId) => {
-        const isGptOss = modelId === "openai/gpt-oss-120b" || modelId === "openai/gpt-oss-20b";
+        // Models run with low reasoningEffort (gpt-oss variants + gpt-5.6-luna)
+        // get a larger maxTokens budget for reasoning tokens; everything else
+        // stays lean at 256.
+        const lowEffort =
+          modelId === "openai/gpt-5.6-luna" ||
+          modelId === "openai/gpt-oss-120b" ||
+          modelId === "openai/gpt-oss-20b";
         return {
           modelId,
-          maxTokens: isGptOss ? 1_024 : 256,
+          maxTokens: lowEffort ? 1_024 : 256,
           timeoutMs: 60_000,
-          ...(isGptOss ? { reasoningEffort: "low" as const } : {}),
+          ...(lowEffort ? { reasoningEffort: "low" as const } : {}),
         };
       },
       makeClassifier: (cfg) => createModelRegistryClassifier(cfg)(registry, "/proj"),

@@ -35,14 +35,21 @@ import type {
 
 export const CLASSIFIER_TOOL_NAME = "classifier_verdict";
 
-export const classifierVerdictToolSchema = Type.Object({
-  approved: Type.Boolean({
-    description: "true to allow this exact unsandboxed run",
-  }),
-  reason: Type.Optional(
-    Type.String({ description: "one-line justification; required on deny" }),
-  ),
-});
+export const classifierVerdictToolSchema = Type.Object(
+  {
+    approved: Type.Boolean({
+      description: "true to allow this exact unsandboxed run",
+    }),
+    reason: Type.String({
+      description: "one-line justification for the verdict",
+    }),
+  },
+  // Strict mode requires every property to be in `required` and forbids
+  // additional properties. gpt-5.x-class models (routed via openrouter to
+  // OpenAI/Azure) hard-reject a lax schema — `required` must include every
+  // key in `properties` or the request 400s before the model ever runs.
+  { additionalProperties: false },
+);
 
 export const classifierVerdictTool = {
   name: CLASSIFIER_TOOL_NAME,
