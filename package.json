@@ -11,6 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "bench:classifier": "RUN_BENCHMARK=1 npx vitest run test/benchmark-classifier.test.ts",
+    "bench:classifier:synth": "BENCH_CORPUS_DIR=benchmarks/classifier/corpus-synth npx vitest run test/benchmark-classifier.test.ts",
+    "gen:corpus": "node benchmarks/classifier/synth/generator.mjs --scenarios benchmarks/classifier/synth/scenarios --out benchmarks/classifier/corpus --clean --check",
     "bench:classifier:results": "node scripts/classifier-results.mjs",
     "models:cheaper": "node scripts/openrouter-cheaper-models.mjs"
   },

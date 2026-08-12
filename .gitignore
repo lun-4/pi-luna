@@ -1,3 +1,6 @@
 node_modules/
 .pi/
 .envrc
+# staged synthetic corpus — review before swapping into corpus/ (AC.9 gate)
+benchmarks/classifier/corpus-synth/
+benchmarks/classifier/corpus-synth.manifest.json

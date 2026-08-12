@@ -13,8 +13,8 @@
  *     and writes RESULTS.md. Fail-safe: if no auth is configured it reports and
  *     skips rather than failing.
  */
-import { describe, it, expect, beforeAll } from "vitest";
-import { readdir, readFile, writeFile, mkdir } from "node:fs/promises";
+import { describe, it, expect, beforeAll, vi } from "vitest";
+import { readdir, readFile, writeFile, mkdir, mkdtemp } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { ModelRuntime, ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -24,8 +24,10 @@ import {
   buildClassifierThread,
   createModelRegistryClassifier,
 } from "../src/parts/classifier.js";
+import { buildStories } from "../benchmarks/classifier/synth/generator.mjs";
+import { scenarios as synthScenarios } from "../benchmarks/classifier/synth/scenarios/index.mjs";
 
-const CORPUS_DIR = path.resolve("benchmarks/classifier/corpus");
+const DEFAULT_CORPUS_DIR = path.resolve("benchmarks/classifier/corpus");
 const CANDIDATE_DIR = path.resolve("benchmarks/classifier/candidate-prompts");
 const PRODUCTION_PROMPT = path.resolve("src/parts/classifier-prompt.md");
 const RESULTS = path.resolve("benchmarks/classifier/RESULTS.md");
@@ -87,11 +89,21 @@ function transcriptToEntries(t: Story["transcript"]): SessionEntry[] {
   })) as unknown as SessionEntry[];
 }
 
+/**
+ * Corpus directory, read lazily at call time so a test can point the validator
+ * at a staging corpus via BENCH_CORPUS_DIR without touching the canonical
+ * `corpus/` (default: benchmarks/classifier/corpus).
+ */
+function corpusDir(): string {
+  return process.env.BENCH_CORPUS_DIR ? path.resolve(process.env.BENCH_CORPUS_DIR) : DEFAULT_CORPUS_DIR;
+}
+
 async function loadStories(): Promise<Story[]> {
-  const files = (await readdir(CORPUS_DIR)).filter((f) => f.endsWith(".json"));
+  const dir = corpusDir();
+  const files = (await readdir(dir)).filter((f) => f.endsWith(".json"));
   const stories: Story[] = [];
   for (const f of files) {
-    stories.push(JSON.parse(await readFile(path.join(CORPUS_DIR, f), "utf8")));
+    stories.push(JSON.parse(await readFile(path.join(dir, f), "utf8")));
   }
   return stories.sort((a, b) => a.id.localeCompare(b.id));
 }
@@ -155,11 +167,75 @@ describe("benchmark corpus validator", () => {
     }
   });
 
+  it("preserves assistant toolCall blocks (id/name/arguments) through buildClassifierThread", () => {
+    // The corpus uses real toolCall blocks (no toolResult) — exactly the view
+    // buildClassifierThread feeds the model. Assert they round-trip verbatim.
+    const allCalls = stories.flatMap((s) =>
+      s.transcript
+        .filter((m) => m.role === "assistant")
+        .flatMap((m) => (Array.isArray(m.content) ? m.content.filter((b) => b.type === "toolCall") : [])),
+    );
+    // Every story must show real tool work (>=1 toolCall each).
+    expect(allCalls.length).toBeGreaterThanOrEqual(stories.length);
+    for (const s of stories) {
+      const thread = buildClassifierThread(transcriptToEntries(s.transcript), s.targetCommand, { cwd: "/proj" });
+      const srcAsst = s.transcript.filter((m) => m.role === "assistant");
+      const dstAsst = thread.filter((t) => t.role === "assistant");
+      expect(dstAsst.length, `story ${s.id} assistant count`).toBe(srcAsst.length);
+      srcAsst.forEach((m, i) => {
+        const srcBlocks = Array.isArray(m.content) ? (m.content as { type: string; id?: string; name?: string; arguments?: unknown }[]) : [];
+        const dstBlocks = Array.isArray(dstAsst[i].content) ? (dstAsst[i].content as { type: string; id?: string; name?: string; arguments?: unknown }[]) : [];
+        expect(dstBlocks.length, `story ${s.id} msg ${i} block count`).toBe(srcBlocks.length);
+        srcBlocks.forEach((b, j) => {
+          expect(dstBlocks[j].type).toBe(b.type);
+          if (b.type === "toolCall") {
+            expect(dstBlocks[j].id, `story ${s.id} toolCall ${j} id`).toBe(b.id);
+            expect(dstBlocks[j].name, `story ${s.id} toolCall ${j} name`).toBe(b.name);
+            expect(JSON.stringify(dstBlocks[j].arguments), `story ${s.id} toolCall ${j} args`).toBe(JSON.stringify(b.arguments));
+          }
+        });
+      });
+    }
+  });
+
+  it("generation is order-independent: permuted scenario orders yield equal sorted story sets (AC.5)", () => {
+    const a = buildStories(synthScenarios, { seed: 42 });
+    const b = buildStories([...synthScenarios].reverse(), { seed: 42 });
+    // Registry order affects emission order only, so canonicalize by sorting by id.
+    const norm = (r: { stories: Story[] }) =>
+      r.stories.map((s) => ({ id: s.id, content: JSON.stringify(s) })).sort((x, y) => x.id.localeCompare(y.id));
+    expect(norm(a as any)).toEqual(norm(b as any));
+  });
+
   it("has a mix of categories and both verdicts", () => {
     const cats = new Set(stories.map((s) => s.category));
     expect(cats.size).toBeGreaterThanOrEqual(6);
     expect(stories.some((s) => s.expected === "approve")).toBe(true);
     expect(stories.some((s) => s.expected === "deny")).toBe(true);
+  });
+
+  it("honors BENCH_CORPUS_DIR so a staging corpus can be validated without touching corpus/", async () => {
+    // Because corpusDir() is read lazily inside loadStories(), pointing the
+    // env var at a temp dir makes the real validator run against that set.
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "bench-corpus-"));
+    const story = {
+      id: "env-override-probe",
+      title: "probe",
+      category: "benign",
+      severity: "info",
+      transcript: [{ role: "user", content: "probe" }],
+      targetCommand: "true",
+      expected: "approve",
+      rationale: "probe",
+    };
+    await writeFile(path.join(tmp, "env-override-probe.json"), JSON.stringify(story));
+    vi.stubEnv("BENCH_CORPUS_DIR", tmp);
+    try {
+      const loaded = await loadStories();
+      expect(loaded.map((s) => s.id)).toEqual(["env-override-probe"]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

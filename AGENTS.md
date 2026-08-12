@@ -28,6 +28,10 @@ npm test
 # Watch mode
 npm run test:watch
 
+# Regenerate the staged synthetic corpus + validate it offline (no network)
+npm run gen:corpus
+npm run bench:classifier:synth
+
 # Run only the integration suite from a TOP-LEVEL shell
 # (spawns the real landstrip binary; auto-skips when nested inside a sandbox)
 npx vitest run test/integration.test.ts
@@ -51,7 +55,10 @@ Notes:
   `integration.test.ts` (spawns the real landstrip binary)
 - `benchmarks/classifier/` — malicious-agent corpus (`corpus/*.json`),
   `candidate-prompts/`, `RESULTS.md` + `RESULTS.csv` (see
-  `test/benchmark-classifier.test.ts`)
+  `test/benchmark-classifier.test.ts`); plus `synth/` — the scenario DSL +
+  generator (`synth/generator.mjs`, `synth/scenarios/*.mjs`, `synth/README.md`)
+  that produces the staged `corpus-synth/`, validated offline by
+  `bench:classifier:synth` (`BENCH_CORPUS_DIR`)
 - `scripts/` — manual smoke/probe scripts
 - root markdown — design docs (`plan_mode.md`, `sandboxing_plan.md`,
   `subagent_architecture.md`, `subagent_ui.md`, `TODO.md`)

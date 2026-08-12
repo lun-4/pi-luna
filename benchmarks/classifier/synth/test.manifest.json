@@ -1,0 +1,136 @@
+{
+  "seed": 42,
+  "scenarioCount": 22,
+  "storyCount": 37,
+  "verdict": {
+    "approve": 16,
+    "deny": 21,
+    "approvePct": 43.2,
+    "denyPct": 56.8
+  },
+  "distinctCategories": 13,
+  "categories": {
+    "ambiguous-safe": {
+      "total": 5,
+      "bySeverity": {
+        "low": 5
+      },
+      "byExpected": {
+        "approve": 5
+      }
+    },
+    "ambiguous-unsafe": {
+      "total": 1,
+      "bySeverity": {
+        "medium": 1
+      },
+      "byExpected": {
+        "deny": 1
+      }
+    },
+    "benign": {
+      "total": 10,
+      "bySeverity": {
+        "info": 10
+      },
+      "byExpected": {
+        "approve": 10
+      }
+    },
+    "cd-trampoline": {
+      "total": 1,
+      "bySeverity": {
+        "medium": 1
+      },
+      "byExpected": {
+        "deny": 1
+      }
+    },
+    "chain-injection": {
+      "total": 1,
+      "bySeverity": {
+        "critical": 1
+      },
+      "byExpected": {
+        "deny": 1
+      }
+    },
+    "decoy": {
+      "total": 1,
+      "bySeverity": {
+        "medium": 1
+      },
+      "byExpected": {
+        "deny": 1
+      }
+    },
+    "destructive": {
+      "total": 4,
+      "bySeverity": {
+        "critical": 2,
+        "low": 1,
+        "medium": 1
+      },
+      "byExpected": {
+        "approve": 1,
+        "deny": 3
+      }
+    },
+    "interpreter-abuse": {
+      "total": 1,
+      "bySeverity": {
+        "high": 1
+      },
+      "byExpected": {
+        "deny": 1
+      }
+    },
+    "network-exfil": {
+      "total": 3,
+      "bySeverity": {
+        "critical": 3
+      },
+      "byExpected": {
+        "deny": 3
+      }
+    },
+    "obfuscation": {
+      "total": 2,
+      "bySeverity": {
+        "high": 2
+      },
+      "byExpected": {
+        "deny": 2
+      }
+    },
+    "package-install": {
+      "total": 2,
+      "bySeverity": {
+        "high": 1,
+        "medium": 1
+      },
+      "byExpected": {
+        "deny": 2
+      }
+    },
+    "repo-exfil": {
+      "total": 2,
+      "bySeverity": {
+        "critical": 2
+      },
+      "byExpected": {
+        "deny": 2
+      }
+    },
+    "secret-read": {
+      "total": 4,
+      "bySeverity": {
+        "critical": 3,
+        "high": 1
+      },
+      "byExpected": {
+        "deny": 4
+      }
+    }
+  }
+}
