@@ -12,6 +12,19 @@
  *     (the exact production code path) over each {model × prompt} combination
  *     and writes RESULTS.md. Fail-safe: if no auth is configured it reports and
  *     skips rather than failing.
+ *
+ * The live orchestration itself lives in `benchmarks/classifier/runner.ts`
+ * (`runBenchmark`); its hit/miss/resume/fail-soft behavior is unit-tested
+ * offline with a fake classifier + a real temp SQLite DB in
+ * `test/classifier-bench-cache.test.ts` — the `it` below is just the real,
+ * registry-backed wiring into that orchestration.
+ *
+ * CACHE: verdicts are stored on-disk keyed by a hash of the request input
+ * (see `benchmarks/classifier/cache.ts`), so reruns reuse prior LLM verdicts
+ * instead of re-calling the model. The cache DB lives at
+ * `benchmarks/classifier/cache.sqlite3` by default, overridable via
+ * `BENCH_CACHE_PATH`. The runner logs `[bench] cache: N hits, M misses` after
+ * the run.
  */
 import { describe, it, expect, beforeAll, vi } from "vitest";
 import { readdir, readFile, writeFile, mkdir, mkdtemp } from "node:fs/promises";
@@ -19,30 +32,25 @@ import path from "node:path";
 import os from "node:os";
 import { ModelRuntime, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import type { Message, CredentialStore } from "@earendil-works/pi-ai";
+import type { CredentialStore } from "@earendil-works/pi-ai";
 import {
   buildClassifierThread,
   createModelRegistryClassifier,
 } from "../src/parts/classifier.js";
 import { buildStories } from "../benchmarks/classifier/synth/generator.mjs";
 import { scenarios as synthScenarios } from "../benchmarks/classifier/synth/scenarios/index.mjs";
-
-const DEFAULT_CORPUS_DIR = path.resolve("benchmarks/classifier/corpus");
+import {
+  runBenchmark,
+  benchOutputDir,
+  toolCallsPerStory,
+  shouldRequireToolCalls,
+  DEFAULT_CORPUS_DIR,
+  type Story,
+} from "../benchmarks/classifier/runner.js";
 const CANDIDATE_DIR = path.resolve("benchmarks/classifier/candidate-prompts");
 const PRODUCTION_PROMPT = path.resolve("src/parts/classifier-prompt.md");
 const RESULTS = path.resolve("benchmarks/classifier/RESULTS.md");
 const RESULTS_CSV = path.resolve("benchmarks/classifier/RESULTS.csv");
-
-interface Story {
-  id: string;
-  title: string;
-  category: string;
-  severity: string;
-  transcript: { role: string; content: unknown }[];
-  targetCommand: string;
-  expected: "approve" | "deny";
-  rationale: string;
-}
 
 function textOf(content: unknown): string {
   if (typeof content === "string") return content;
@@ -52,31 +60,6 @@ function textOf(content: unknown): string {
       .join("");
   }
   return String(content);
-}
-
-/** Run `fn` over `items` with at most `limit` in flight (results stay in order). */
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  async function worker() {
-    while (true) {
-      const i = next++;
-      if (i >= items.length) return;
-      out[i] = await fn(items[i], i);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
-  return out;
-}
-
-/** Escape one CSV field (quote only when needed). */
-function csvField(v: unknown): string {
-  const s = String(v ?? "");
-  return /[,"\n]/.test(s) ? `"${s.replace(/"/g, "\"\"")}"` : s;
-}
-
-function toCsv(rows: unknown[][]): string {
-  return rows.map((r) => r.map(csvField).join(",")).join("\n") + "\n";
 }
 
 function transcriptToEntries(t: Story["transcript"]): SessionEntry[] {
@@ -91,11 +74,13 @@ function transcriptToEntries(t: Story["transcript"]): SessionEntry[] {
 
 /**
  * Corpus directory, read lazily at call time so a test can point the validator
- * at a staging corpus via BENCH_CORPUS_DIR without touching the canonical
- * `corpus/` (default: benchmarks/classifier/corpus).
+ * at a staging corpus via BENCH_CORPUS_DIR **or** BENCH_DIRECTORY (the kara
+ * alias) without touching the canonical `corpus/`. BENCH_CORPUS_DIR wins when
+ * both are set (default: benchmarks/classifier/corpus).
  */
 function corpusDir(): string {
-  return process.env.BENCH_CORPUS_DIR ? path.resolve(process.env.BENCH_CORPUS_DIR) : DEFAULT_CORPUS_DIR;
+  const dir = process.env.BENCH_CORPUS_DIR ?? process.env.BENCH_DIRECTORY;
+  return dir ? path.resolve(dir) : DEFAULT_CORPUS_DIR;
 }
 
 async function loadStories(): Promise<Story[]> {
@@ -170,13 +155,14 @@ describe("benchmark corpus validator", () => {
   it("preserves assistant toolCall blocks (id/name/arguments) through buildClassifierThread", () => {
     // The corpus uses real toolCall blocks (no toolResult) — exactly the view
     // buildClassifierThread feeds the model. Assert they round-trip verbatim.
-    const allCalls = stories.flatMap((s) =>
-      s.transcript
-        .filter((m) => m.role === "assistant")
-        .flatMap((m) => (Array.isArray(m.content) ? m.content.filter((b) => b.type === "toolCall") : [])),
-    );
-    // Every story must show real tool work (>=1 toolCall each).
-    expect(allCalls.length).toBeGreaterThanOrEqual(stories.length);
+    // Data-adaptive toolCall guarantee: strictly required for the canonical dir
+    // (a canonical corpus with zero tool calls must fail — it cannot silently
+    // regress to all-text), and required in every story whenever ANY story in
+    // the corpus already carries a toolCall. A legitimately text-only corpus
+    // (kara's source format has no tool calls) passes without fabrication.
+    if (shouldRequireToolCalls(corpusDir(), stories)) {
+      expect(toolCallsPerStory(stories).every((n) => n >= 1)).toBe(true);
+    }
     for (const s of stories) {
       const thread = buildClassifierThread(transcriptToEntries(s.transcript), s.targetCommand, { cwd: "/proj" });
       const srcAsst = s.transcript.filter((m) => m.role === "assistant");
@@ -237,10 +223,65 @@ describe("benchmark corpus validator", () => {
       vi.unstubAllEnvs();
     }
   });
+
+  it("honors BENCH_DIRECTORY as an alias for BENCH_CORPUS_DIR", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "bench-dir-"));
+    const story = {
+      id: "dir-alias-probe",
+      title: "probe",
+      category: "benign",
+      severity: "info",
+      transcript: [{ role: "user", content: "probe" }],
+      targetCommand: "true",
+      expected: "approve",
+      rationale: "probe",
+    };
+    await writeFile(path.join(tmp, "dir-alias-probe.json"), JSON.stringify(story));
+    vi.stubEnv("BENCH_DIRECTORY", tmp);
+    // Clear BENCH_CORPUS_DIR (undefined removes the var) so the alias fallback is
+    // actually exercised regardless of any externally-set BENCH_CORPUS_DIR.
+    vi.stubEnv("BENCH_CORPUS_DIR", undefined);
+    try {
+      const loaded = await loadStories();
+      expect(loaded.map((s) => s.id)).toEqual(["dir-alias-probe"]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("gives BENCH_CORPUS_DIR precedence over BENCH_DIRECTORY (a precedence regression must fail)", async () => {
+    const a = await mkdtemp(path.join(os.tmpdir(), "bench-cd-"));
+    const b = await mkdtemp(path.join(os.tmpdir(), "bench-dir-"));
+    const mk = (dir: string, id: string) =>
+      writeFile(path.join(dir, `${id}.json`), JSON.stringify({
+        id, title: "probe", category: "benign", severity: "info",
+        transcript: [{ role: "user", content: "probe" }],
+        targetCommand: "true", expected: "approve", rationale: "probe",
+      }));
+    await mk(a, "from-corpus-dir");
+    await mk(b, "from-directory");
+    vi.stubEnv("BENCH_CORPUS_DIR", a);
+    vi.stubEnv("BENCH_DIRECTORY", b);
+    try {
+      const loaded = await loadStories();
+      expect(loaded.map((s) => s.id)).toEqual(["from-corpus-dir"]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("uses benchOutputDir() for the live runner so BENCH_OUTPUT_DIR is honored", () => {
+    vi.stubEnv("BENCH_OUTPUT_DIR", "benchmarks/classifier/kara-results");
+    try {
+      expect(benchOutputDir()).toBe(path.resolve("benchmarks/classifier/kara-results"));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
-// 2. Live runner (gated)
+// 2. Live runner (gated) — thin wiring into runBenchmark()
 // ---------------------------------------------------------------------------
 
 async function loadPrompts(): Promise<{ name: string; body: string }[]> {
@@ -257,8 +298,8 @@ async function loadPrompts(): Promise<{ name: string; body: string }[]> {
 const live = process.env.RUN_BENCHMARK === "1";
 describe.skipIf(!live)("live classifier benchmark", () => {
   // 34 stories × N prompts × M models of network calls — far beyond vitest's
-  // 5s default. Give it generous headroom.
-  it("classifies every story over each model × prompt and writes RESULTS.md", async () => {
+  // 5s default. Give it generous headroom. The on-disk cache makes reruns fast.
+  it("classifies every story over each model × prompt and writes RESULTS.md (cached)", async () => {
     const log = (line: string) => {
       // Stream to stderr so progress shows live even while the result buffers.
       process.stderr.write(`[bench] ${line}\n`);
@@ -306,19 +347,6 @@ describe.skipIf(!live)("live classifier benchmark", () => {
       return;
     }
 
-    const rows: string[] = [];
-    const csvRows: unknown[][] = [
-      ["story", "category", "severity", "expected", "got", "pass", "model", "prompt", "reason", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "total_tokens", "cost_usd"],
-    ];
-    rows.push("# Classifier benchmark results");
-    rows.push("");
-    rows.push(`- corpus: ${stories.length} stories`);
-    rows.push(`- concurrency: ${process.env.BENCH_CONCURRENCY ?? "8"} (set BENCH_CONCURRENCY to change)`);
-    rows.push(`- date: ${new Date().toISOString()}`);
-    rows.push("");
-    rows.push("| model | prompt | approved | denied | correct | accuracy | tokens (in / out / cacheRead / total) |");
-    rows.push("|-------|--------|----------|--------|---------|----------|-----------------------------------------|");
-
     // Auth diagnostic — confirms which env var / credential the provider is using.
     const hasKeyEnv = !!process.env.OPENROUTER_API_KEY;
     log(`auth source: ${hasKeyEnv ? "env-first: OPENROUTER_API_KEY (stored pi auth.json credential bypassed)" : "pi's stored credential (auth.json), env var absent"}`);
@@ -327,93 +355,25 @@ describe.skipIf(!live)("live classifier benchmark", () => {
       log(`model ${modelId}: ${m ? "found" : "NOT FOUND"} | hasConfiguredAuth=${m ? registry.hasConfiguredAuth(m) : false}`);
     }
 
-    const concurrency = Math.max(1, Number(process.env.BENCH_CONCURRENCY ?? 8));
-
-    for (const modelId of models) {
-      // GPT-OSS is a reasoning model. Give it enough room to reason and emit
-      // the forced tool call; with the generic 256-token budget it can end in
-      // stopReason=error before producing a verdict.
-      const isGptOss = modelId === "openai/gpt-oss-120b" || modelId === "openai/gpt-oss-20b";
-      // Fail-soft per model: if auth isn't configured or the model can't be
-      // found, report and move on instead of failing the whole benchmark run.
-      try {
-        const client = createModelRegistryClassifier({
+    const result = await runBenchmark({
+      stories,
+      models,
+      prompts,
+      outputDir: benchOutputDir(),
+      concurrency: Math.max(1, Number(process.env.BENCH_CONCURRENCY ?? 8)),
+      cachePath: process.env.BENCH_CACHE_PATH ?? "benchmarks/classifier/cache.sqlite3",
+      resolveConfig: (modelId) => {
+        const isGptOss = modelId === "openai/gpt-oss-120b" || modelId === "openai/gpt-oss-20b";
+        return {
           modelId,
           maxTokens: isGptOss ? 1_024 : 256,
           timeoutMs: 60_000,
           ...(isGptOss ? { reasoningEffort: "low" as const } : {}),
-        })(registry, "/proj");
-        for (const prompt of prompts) {
-          let approved = 0;
-          let denied = 0;
-          let correct = 0;
-          const mistakes: { id: string; expected: string; got: string; reason: string }[] = [];
-          const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-          // Stories within a (model × prompt) run concurrently (bounded).
-          await mapLimit(stories, concurrency, async (s, index) => {
-            const thread = buildClassifierThread(
-              transcriptToEntries(s.transcript),
-              s.targetCommand,
-              { cwd: "/proj" },
-            );
-            const verdict = await client.classify(
-              { systemPrompt: prompt.body, messages: thread as Message[], targetCommand: s.targetCommand },
-              { signal: undefined },
-            );
-            const got = verdict.approved ? "approve" : "deny";
-            const mark = got === s.expected ? "✓" : "✗";
-            const u = verdict.usage;
-            const tok = u ? ` (${u.input ?? 0}↓/${u.output ?? 0}↑)` : "";
-            log(`${mark} ${modelId} × ${prompt.name}: ${s.id} → ${got} (expected ${s.expected})${tok}${verdict.reason ? ` — ${verdict.reason}` : ""}`);
-            // One CSV row per test, with real usage + cost from the response.
-            csvRows.push([
-              s.id, s.category, s.severity, s.expected, got, got === s.expected ? "pass" : "fail",
-              modelId, prompt.name, verdict.reason ?? "",
-              u?.input ?? 0, u?.output ?? 0, u?.cacheRead ?? 0, u?.cacheWrite ?? 0, u?.totalTokens ?? 0,
-              (u?.cost?.total ?? 0).toFixed(6),
-              // original story order within this (model × prompt) for stable sort
-              `${modelId}|${prompt.name}|${String(index).padStart(3, "0")}`,
-            ]);
-            if (verdict.approved) approved++;
-            else denied++;
-            if (u) {
-              usage.input += u.input ?? 0;
-              usage.output += u.output ?? 0;
-              usage.cacheRead += u.cacheRead ?? 0;
-              usage.cacheWrite += u.cacheWrite ?? 0;
-              usage.total += u.totalTokens ?? 0;
-            }
-            if (got === s.expected) correct++;
-            else mistakes.push({ id: s.id, expected: s.expected, got, reason: verdict.reason ?? "" });
-          });
-          const acc = (correct / stories.length).toFixed(3);
-          rows.push(`| ${modelId} | ${prompt.name} | ${approved} | ${denied} | ${correct} | ${acc} | ${usage.input} / ${usage.output} / ${usage.cacheRead} / ${usage.total} |`);
-          log(`finished ${modelId} × ${prompt.name}: ${correct}/${stories.length} correct (${acc}) | in=${usage.input} out=${usage.output} total=${usage.total}`);
-          if (mistakes.length) {
-            rows.push("");
-            rows.push(`### ${modelId} × ${prompt.name} — ${mistakes.length} mistakes`);
-            for (const m of mistakes) {
-              rows.push(`- **${m.id}**: expected ${m.expected}, got ${m.got} — ${m.reason}`);
-            }
-          }
-        }
-      } catch (err) {
-        rows.push("");
-        rows.push(`### ${modelId} — skipped: ${(err as Error).message}`);
-        log(`skipping ${modelId}: ${(err as Error).message}`);
-      }
-    }
-
-    await mkdir(path.dirname(RESULTS), { recursive: true });
-    await writeFile(RESULTS, rows.join("\n") + "\n");
-    // Stable CSV: sort test rows by model × prompt × original story order,
-    // drop the internal sort key column, then write.
-    const header = csvRows[0];
-    const dataRows = csvRows.slice(1);
-    dataRows.sort((a, b) => String(a[a.length - 1]).localeCompare(String(b[b.length - 1])));
-    const csvRowsStripped: unknown[][] = [header, ...dataRows.map((r) => r.slice(0, -1))];
-    await writeFile(RESULTS_CSV, toCsv(csvRowsStripped));
-    // Surface the summary in the test log.
-    log(`wrote ${RESULTS} and ${RESULTS_CSV}: ${stories.length} stories × ${models.length} × ${prompts.length}`);
+        };
+      },
+      makeClassifier: (cfg) => createModelRegistryClassifier(cfg)(registry, "/proj"),
+      log,
+    });
+    log(`cache: ${result.hits} hits, ${result.misses} misses`);
   }, 600_000);
 });

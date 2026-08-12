@@ -58,7 +58,11 @@ Notes:
   `test/benchmark-classifier.test.ts`); plus `synth/` — the scenario DSL +
   generator (`synth/generator.mjs`, `synth/scenarios/*.mjs`, `synth/README.md`)
   that produces the staged `corpus-synth/`, validated offline by
-  `bench:classifier:synth` (`BENCH_CORPUS_DIR`)
+  `bench:classifier:synth` (`BENCH_CORPUS_DIR`); plus `kara/` — the converter
+  (`benchmarks/classifier/kara/convert.mjs`) that turns the committed
+  `kara-synth-data/*.jsonl` into the gitignored `kara-corpus/` via
+  `gen:kara-corpus` (benchmed with `BENCH_DIRECTORY`, results in
+  `BENCH_OUTPUT_DIR`).
 - `scripts/` — manual smoke/probe scripts
 - root markdown — design docs (`plan_mode.md`, `sandboxing_plan.md`,
   `subagent_architecture.md`, `subagent_ui.md`, `TODO.md`)

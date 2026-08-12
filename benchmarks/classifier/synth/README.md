@@ -138,6 +138,65 @@ never inside the story dir.
 The manifest reports counts by category × severity × expected, the verdict
 ratio, and the distinct-category count.
 
+## Kara corpus
+
+A second corpus source: Atomic-Red-Team-style classification examples from
+`kara-synth-data/*.jsonl` (see `kara-synth-data/README.md` for the external
+format) are converted into the same corpus schema by
+`benchmarks/classifier/kara/convert.mjs` — pure ESM, deterministic, zero deps.
+Each surviving row becomes one story:
+
+- `expected`: `allow` → `approve`, `deny` → `deny` (verbatim `decision_label`;
+  oracle rows stay `deny` even when `source.target_decision` is `BENIGN` — the
+  context is unauthorized, and that is exactly what the bench should stress).
+- `transcript`: the row's `messages` **verbatim** — all-`user` plain strings, no
+  fabricated assistant turns, no invented `toolCall` blocks (the source format
+  has none; the bench's toolCall validation is data-adaptive, see
+  `shouldRequireToolCalls` in `runner.ts`).
+- `targetCommand`: `command` (multi-line is fine — the runner embeds it in a
+  code fence). `category`: first ART technique token (`T1123`, `T1546.004`, …)
+  else the `episode_id` stem else `uncategorized`. `severity`: harm label →
+  high/medium/info (informational only). `title`/`rationale` synthesized from
+  `episode_id`/context/harm/source.
+- `id`: `kara-<episode_id>-<context_id>-<view>[-<runIdPrefix><attemptIndex>]-<hash>`
+  (run/attempt segment on oracle rows only) — every line a distinct, stable story.
+
+**Dropped rows** (counted in the manifest, never silently lost):
+`request_context` verdicts (no 2-way equivalent — this also removes every
+`command_only` row, which are all `request_context` with empty `messages`), and
+any remaining empty-message row (the validator forbids empty transcripts).
+
+### Conversion + validation
+
+```sh
+npm run gen:kara-corpus          # -> benchmarks/classifier/kara-corpus/ + sibling manifest (--clean --check)
+# offline validator against the converted corpus (no RUN_BENCHMARK):
+BENCH_DIRECTORY=benchmarks/classifier/kara-corpus npx vitest run test/benchmark-classifier.test.ts
+```
+
+`BENCH_DIRECTORY` is an alias for `BENCH_CORPUS_DIR` (both point the offline
+validator at a non-canonical corpus dir; `BENCH_CORPUS_DIR` wins when both are
+set). `--check` runs schema + diversity gates (≥20 stories, ≥6 distinct
+categories, both verdicts) as hard failures, so a generated corpus can never
+report success while failing real offline validation for those reasons.
+
+### Paid run
+
+```sh
+npm run bench:classifier:kara    # convert + live LLM run -> benchmarks/classifier/kara-results/
+# or manually, honoring the same env vars:
+BENCH_DIRECTORY=benchmarks/classifier/kara-corpus \
+BENCH_OUTPUT_DIR=benchmarks/classifier/kara-results \
+npm run bench:classifier
+```
+
+`BENCH_OUTPUT_DIR` (default `benchmarks/classifier`) steers `RESULTS.md` /
+`RESULTS.csv` so kara results never clobber the committed canonical files; a
+cheap generalization probe is `node benchmarks/classifier/kara/convert.mjs
+--out /tmp/kara-eval --split eval --check` + the offline validator pointed at
+that dir (80 eval rows → 40 surviving stories). Verdicts cache on disk as usual
+(`BENCH_CACHE_PATH`), so reruns are near-free; `BENCH_MODELS` trims model count.
+
 ## Workflow
 
 `gen:corpus` targets the canonical `corpus/` directly, so there's no separate
@@ -183,3 +242,9 @@ requires network + API auth:
 npm run bench:classifier        # live LLM run -> RESULTS.md / RESULTS.csv
 npm test                        # offline validator only (no network, default)
 ```
+
+Reruns are near-free: each `(model × prompt × story)` verdict is cached on disk
+in `benchmarks/classifier/cache.sqlite3` (SHA-256 keyed on the request bytes, so
+keys invalidate when the prompt, corpus, or model config changes). The cache
+path is overridable via `BENCH_CACHE_PATH`; a rerun that finds every verdict
+cached issues zero LLM calls, and a failed run resumes from where it left off.

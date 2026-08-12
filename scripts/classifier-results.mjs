@@ -79,6 +79,10 @@ if (rows.length < 2) {
         approved: 0,
         denied: 0,
         correct: 0,
+        expApprove: 0,
+        expDeny: 0,
+        acceptCorrect: 0,
+        refusalCorrect: 0,
         ...Object.fromEntries(numericFields.map((field) => [field, 0])),
       };
       groups.set(key, group);
@@ -86,6 +90,13 @@ if (rows.length < 2) {
     group.tests++;
     group[record.got === "approve" ? "approved" : "denied"]++;
     group.correct += record.pass === "pass" ? 1 : 0;
+    if (record.expected === "approve") {
+      group.expApprove++;
+      if (record.got === "approve") group.acceptCorrect++;
+    } else {
+      group.expDeny++;
+      if (record.got === "deny") group.refusalCorrect++;
+    }
     for (const field of numericFields) group[field] += Number(record[field]) || 0;
   }
 
@@ -97,20 +108,32 @@ if (rows.length < 2) {
     denied: String(group.denied),
     correct: `${group.correct}/${group.tests}`,
     accuracy: `${((group.correct / group.tests) * 100).toFixed(1)}%`,
+    acceptCrct: `${group.acceptCorrect}/${group.expApprove}`,
+    acceptRate: `${(group.expApprove ? (group.acceptCorrect / group.expApprove) * 100 : 0).toFixed(1)}%`,
+    refusalCrct: `${group.refusalCorrect}/${group.expDeny}`,
+    slipped: String(group.expDeny - group.refusalCorrect),
+    refusalRate: `${(group.expDeny ? (group.refusalCorrect / group.expDeny) * 100 : 0).toFixed(1)}%`,
     tokens: group.total_tokens.toLocaleString("en-US"),
     cost: `$${group.cost_usd.toFixed(6)}`,
   }));
   table.sort((a, b) =>
+    Number.parseInt(b.tests, 10) - Number.parseInt(a.tests, 10) ||
     Number.parseFloat(b.accuracy) - Number.parseFloat(a.accuracy) ||
     a.model.localeCompare(b.model) ||
     a.prompt.localeCompare(b.prompt),
   );
-  const columns = ["model", "prompt", "tests", "approved", "denied", "correct", "accuracy", "tokens", "cost"];
+  const columns = ["model", "prompt", "tests", "approved", "denied", "correct", "accuracy", "acceptCrct", "acceptRate", "refusalCrct", "slipped", "refusalRate", "tokens", "cost"];
+  const headerNames = {
+    model: "model", prompt: "prompt", tests: "tests", approved: "approved", denied: "denied",
+    correct: "correct", accuracy: "accuracy", acceptCrct: "acceptCrct", acceptRate: "acceptRate",
+    refusalCrct: "refusalCrct", slipped: "slipped", refusalRate: "refusalRate",
+    tokens: "tokens", cost: "cost",
+  };
   const widths = Object.fromEntries(
-    columns.map((column) => [column, Math.max(column.length, ...table.map((row) => row[column].length))]),
+    columns.map((column) => [column, Math.max(headerNames[column].length, ...table.map((row) => row[column].length))]),
   );
   const line = (row) => `| ${columns.map((column) => row[column].padEnd(widths[column])).join(" | ")} |`;
-  console.log(line(Object.fromEntries(columns.map((column) => [column, column]))));
+  console.log(line(Object.fromEntries(columns.map((column) => [column, headerNames[column]]))));
   console.log(`|${columns.map((column) => ` ${"-".repeat(widths[column])} `).join("|")}|`);
   for (const row of table) console.log(line(row));
 }

@@ -10,8 +10,11 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
     "bench:classifier": "RUN_BENCHMARK=1 npx vitest run test/benchmark-classifier.test.ts",
     "bench:classifier:synth": "BENCH_CORPUS_DIR=benchmarks/classifier/corpus-synth npx vitest run test/benchmark-classifier.test.ts",
+    "gen:kara-corpus": "node benchmarks/classifier/kara/convert.mjs --out benchmarks/classifier/kara-corpus --clean --check",
+    "bench:classifier:kara": "npm run gen:kara-corpus && BENCH_DIRECTORY=benchmarks/classifier/kara-corpus BENCH_OUTPUT_DIR=benchmarks/classifier/kara-results npm run bench:classifier",
     "gen:corpus": "node benchmarks/classifier/synth/generator.mjs --scenarios benchmarks/classifier/synth/scenarios --out benchmarks/classifier/corpus --clean --check",
     "bench:classifier:results": "node scripts/classifier-results.mjs",
     "models:cheaper": "node scripts/openrouter-cheaper-models.mjs"

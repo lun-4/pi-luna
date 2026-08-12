@@ -4,3 +4,9 @@ node_modules/
 # staged synthetic corpus — review before swapping into corpus/ (AC.9 gate)
 benchmarks/classifier/corpus-synth/
 benchmarks/classifier/corpus-synth.manifest.json
+# kara corpus + results — regenerated on demand by gen:kara-corpus (source data stays committed)
+benchmarks/classifier/kara-corpus/
+benchmarks/classifier/kara-corpus.manifest.json
+benchmarks/classifier/kara-results/
+# on-disk verdict cache for the live classifier benchmark
+benchmarks/classifier/cache.sqlite3*
