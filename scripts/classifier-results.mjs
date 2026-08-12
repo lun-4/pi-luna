@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const defaultResults = path.resolve(
+const defaultResults = process.env.RESULTS_CSV || path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../benchmarks/classifier/RESULTS.csv",
 );

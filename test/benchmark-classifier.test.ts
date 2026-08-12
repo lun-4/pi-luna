@@ -37,6 +37,10 @@ import {
   buildClassifierThread,
   createModelRegistryClassifier,
 } from "../src/parts/classifier.js";
+import {
+  createLocalClassifier,
+  isLocalModelId,
+} from "../src/parts/classifier-local.js";
 import { buildStories } from "../benchmarks/classifier/synth/generator.mjs";
 import { scenarios as synthScenarios } from "../benchmarks/classifier/synth/scenarios/index.mjs";
 import {
@@ -313,8 +317,19 @@ describe.skipIf(!live)("live classifier benchmark", () => {
       "openai/gpt-oss-20b",
       "meta-llama/llama-3.1-8b-instruct",
       "mistralai/mistral-nemo",
+      // Local Shieldstral via the OpenAI-compatible llama.cpp server.
+      "localhost/shieldstral-3b",
     ].join(","))
       .split(",").map((s) => s.trim()).filter(Boolean);
+
+    // Local (non-openrouter) models route through the OpenAI-compatible HTTP
+    // client instead of the pi model registry. Env vars let you point it at
+    // your own llama.cpp/router without editing code.
+    const localBaseUrl =
+      process.env.BENCH_LOCAL_BASE_URL ?? "http://127.0.0.1:8080";
+    const localModel =
+      process.env.BENCH_LOCAL_MODEL ??
+      "./Shieldstral-1.0-3B-GGUF/Shieldstral-1.0-3B-Q4_K_M.gguf";
 
     // Build the real runtime + registry (production-compatible path).
     // refreshOnCreate MUST stay on (not false): the availability refresh is
@@ -352,6 +367,10 @@ describe.skipIf(!live)("live classifier benchmark", () => {
     const hasKeyEnv = !!process.env.OPENROUTER_API_KEY;
     log(`auth source: ${hasKeyEnv ? "env-first: OPENROUTER_API_KEY (stored pi auth.json credential bypassed)" : "pi's stored credential (auth.json), env var absent"}`);
     for (const modelId of models) {
+      if (isLocalModelId(modelId)) {
+        log(`model ${modelId}: local via ${localBaseUrl} (${localModel})`);
+        continue;
+      }
       const m = registry.find("openrouter", modelId);
       log(`model ${modelId}: ${m ? "found" : "NOT FOUND"} | hasConfiguredAuth=${m ? registry.hasConfiguredAuth(m) : false}`);
     }
@@ -378,7 +397,15 @@ describe.skipIf(!live)("live classifier benchmark", () => {
           ...(lowEffort ? { reasoningEffort: "low" as const } : {}),
         };
       },
-      makeClassifier: (cfg) => createModelRegistryClassifier(cfg)(registry, "/proj"),
+      makeClassifier: (cfg) =>
+        isLocalModelId(cfg.modelId)
+          ? createLocalClassifier({
+              baseUrl: localBaseUrl,
+              model: localModel,
+              maxTokens: 24,
+              timeoutMs: cfg.timeoutMs,
+            })("/proj")
+          : createModelRegistryClassifier(cfg)(registry, "/proj"),
       log,
     });
     log(`cache: ${result.hits} hits, ${result.misses} misses`);
