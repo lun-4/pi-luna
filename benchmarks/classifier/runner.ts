@@ -250,6 +250,7 @@ export async function runBenchmark(
           let approved = 0;
           let denied = 0;
           let correct = 0;
+          let failed = 0;
           const mistakes: {
             id: string;
             expected: string;
@@ -257,52 +258,68 @@ export async function runBenchmark(
             reason: string;
           }[] = [];
           const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+          const reasonOf = (cr: { reason?: string }) => cr.reason ?? "";
           await mapLimit(stories, concurrency, async (s, index) => {
-            const thread = buildClassifierThread(
-              transcriptToEntries(s.transcript),
-              s.targetCommand,
-              { cwd: "/proj" },
-            );
-            const verdict = await classify(
-              {
-                systemPrompt: prompt.body,
-                messages: thread as Message[],
-                targetCommand: s.targetCommand,
-              },
-              { signal: undefined },
-            );
-            const got = verdict.approved ? "approve" : "deny";
-            const mark = got === s.expected ? "✓" : "✗";
-            const u = verdict.usage;
-            const tok = u ? ` (${u.input ?? 0}↓/${u.output ?? 0}↑)` : "";
-            log(
-              `${mark} ${modelId} × ${prompt.name}: ${s.id} → ${got} (expected ${s.expected})${tok}${verdict.reason ? ` — ${verdict.reason}` : ""}`,
-            );
-            csvRows.push([
-              s.id, s.category, s.severity, s.expected, got, got === s.expected ? "pass" : "fail",
-              modelId, prompt.name, verdict.reason ?? "",
-              u?.input ?? 0, u?.output ?? 0, u?.cacheRead ?? 0, u?.cacheWrite ?? 0,
-              u?.totalTokens ?? 0, (u?.cost?.total ?? 0).toFixed(6),
-              `${modelId}|${prompt.name}|${String(index).padStart(3, "0")}`,
-            ]);
-            if (verdict.approved) approved++;
-            else denied++;
-            if (u) {
-              usage.input += u.input ?? 0;
-              usage.output += u.output ?? 0;
-              usage.cacheRead += u.cacheRead ?? 0;
-              usage.cacheWrite += u.cacheWrite ?? 0;
-              usage.total += u.totalTokens ?? 0;
+            // A single story must never abort the whole (model × prompt) run.
+            // Fail-soft per story: log + record an error row, keep going.
+            try {
+              const thread = buildClassifierThread(
+                transcriptToEntries(s.transcript),
+                s.targetCommand,
+                { cwd: "/proj" },
+              );
+              const verdict = await classify(
+                {
+                  systemPrompt: prompt.body,
+                  messages: thread as Message[],
+                  targetCommand: s.targetCommand,
+                },
+                { signal: undefined },
+              );
+              const got = verdict.approved ? "approve" : "deny";
+              const mark = got === s.expected ? "✓" : "✗";
+              const u = verdict.usage;
+              const tok = u ? ` (${u.input ?? 0}↓/${u.output ?? 0}↑)` : "";
+              log(
+                `${mark} ${modelId} × ${prompt.name}: ${s.id} → ${got} (expected ${s.expected})${tok}${reasonOf(verdict) ? ` — ${reasonOf(verdict)}` : ""}`,
+              );
+              csvRows.push([
+                s.id, s.category, s.severity, s.expected, got, got === s.expected ? "pass" : "fail",
+                modelId, prompt.name, reasonOf(verdict),
+                u?.input ?? 0, u?.output ?? 0, u?.cacheRead ?? 0, u?.cacheWrite ?? 0,
+                u?.totalTokens ?? 0, (u?.cost?.total ?? 0).toFixed(6),
+                `${modelId}|${prompt.name}|${String(index).padStart(3, "0")}`,
+              ]);
+              if (verdict.approved) approved++;
+              else denied++;
+              if (u) {
+                usage.input += u.input ?? 0;
+                usage.output += u.output ?? 0;
+                usage.cacheRead += u.cacheRead ?? 0;
+                usage.cacheWrite += u.cacheWrite ?? 0;
+                usage.total += u.totalTokens ?? 0;
+              }
+              if (got === s.expected) correct++;
+              else mistakes.push({ id: s.id, expected: s.expected, got, reason: reasonOf(verdict) });
+            } catch (err) {
+              failed++;
+              const msg = (err as Error).message ?? String(err);
+              log(`✗ ${modelId} × ${prompt.name}: ${s.id} → ERROR — ${msg}`);
+              csvRows.push([
+                s.id, s.category, s.severity, s.expected, "error", "error",
+                modelId, prompt.name, `classify failed: ${msg}`,
+                0, 0, 0, 0, 0, "0",
+                `${modelId}|${prompt.name}|${String(index).padStart(3, "0")}`,
+              ]);
             }
-            if (got === s.expected) correct++;
-            else mistakes.push({ id: s.id, expected: s.expected, got, reason: verdict.reason ?? "" });
           });
           const acc = (correct / stories.length).toFixed(3);
+          const failNote = failed > 0 ? ` (${failed} classify failures)` : "";
           rows.push(
-            `| ${modelId} | ${prompt.name} | ${approved} | ${denied} | ${correct} | ${acc} | ${usage.input} / ${usage.output} / ${usage.cacheRead} / ${usage.total} |`,
+            `| ${modelId} | ${prompt.name} | ${approved} | ${denied} | ${correct} | ${acc}${failNote} | ${usage.input} / ${usage.output} / ${usage.cacheRead} / ${usage.total} |`,
           );
           log(
-            `finished ${modelId} × ${prompt.name}: ${correct}/${stories.length} correct (${acc}) | in=${usage.input} out=${usage.output} total=${usage.total}`,
+            `finished ${modelId} × ${prompt.name}: ${correct}/${stories.length} correct (${acc})${failNote} | in=${usage.input} out=${usage.output} total=${usage.total}`,
           );
           if (mistakes.length) {
             rows.push("");

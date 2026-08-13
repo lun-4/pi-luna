@@ -41,6 +41,13 @@ import {
   createLocalClassifier,
   isLocalModelId,
 } from "../src/parts/classifier-local.js";
+import {
+  registerUmansProvider,
+  isUmansModelId,
+  umansModelName,
+  resolveUmansAuth,
+} from "../src/parts/classifier-umans.js";
+import { createAnthropicClassifier } from "../src/parts/classifier-anthropic.js";
 import { buildStories } from "../benchmarks/classifier/synth/generator.mjs";
 import { scenarios as synthScenarios } from "../benchmarks/classifier/synth/scenarios/index.mjs";
 import {
@@ -319,6 +326,9 @@ describe.skipIf(!live)("live classifier benchmark", () => {
       "mistralai/mistral-nemo",
       // Local Shieldstral via the OpenAI-compatible llama.cpp server.
       "localhost/shieldstral-3b",
+      // Umans Code gateway (Anthropic-compatible) — sibling of the openrouter
+      // deepseek-v4-flash.
+      "umans/umans-deepseek-v4-flash-0731",
     ].join(","))
       .split(",").map((s) => s.trim()).filter(Boolean);
 
@@ -358,6 +368,9 @@ describe.skipIf(!live)("live classifier benchmark", () => {
         credentials: process.env.OPENROUTER_API_KEY ? emptyCredentialStore : undefined,
       });
       registry = new ModelRegistry(runtime);
+      // The umans provider is normally registered by the pi-provider-umans
+      // extension; the standalone benchmark registry needs it registered here.
+      registerUmansProvider(runtime, registry);
     } catch (err) {
       console.log(`[bench] could not build ModelRuntime/registry, skipping live run: ${(err as Error).message}`);
       return;
@@ -371,8 +384,20 @@ describe.skipIf(!live)("live classifier benchmark", () => {
         log(`model ${modelId}: local via ${localBaseUrl} (${localModel})`);
         continue;
       }
-      const m = registry.find("openrouter", modelId);
+      const provider = isUmansModelId(modelId) ? "umans" : "openrouter";
+      const m = registry.find(provider, modelId);
       log(`model ${modelId}: ${m ? "found" : "NOT FOUND"} | hasConfiguredAuth=${m ? registry.hasConfiguredAuth(m) : false}`);
+    }
+
+    // Resolve umans auth once up front (async) so the sync makeClassifier below
+    // can build raw-Anthropic clients without re-resolving over the store each call.
+    const umansAuths = new Map<string, Awaited<ReturnType<typeof resolveUmansAuth>>>();
+    for (const modelId of models) {
+      if (isUmansModelId(modelId)) {
+        const auth = await resolveUmansAuth(registry, modelId);
+        umansAuths.set(modelId, auth);
+        log(`umans auth for ${modelId}: ${auth ? "resolved" : "UNAVAILABLE"}`);
+      }
     }
 
     const result = await runBenchmark({
@@ -390,6 +415,10 @@ describe.skipIf(!live)("live classifier benchmark", () => {
           modelId === "openai/gpt-5.6-luna" ||
           modelId === "openai/gpt-oss-120b" ||
           modelId === "openai/gpt-oss-20b";
+        // Umans models are handled by the raw Anthropic classifier (their ids keep
+        // the `umans/` prefix so makeClassifier can route them). Non-umans ids go
+        // to the registry classifier; hold the provider explicitly for the cache.
+        const umans = isUmansModelId(modelId);
         return {
           modelId,
           maxTokens: lowEffort ? 1_024 : 256,
@@ -397,15 +426,34 @@ describe.skipIf(!live)("live classifier benchmark", () => {
           ...(lowEffort ? { reasoningEffort: "low" as const } : {}),
         };
       },
-      makeClassifier: (cfg) =>
-        isLocalModelId(cfg.modelId)
-          ? createLocalClassifier({
-              baseUrl: localBaseUrl,
-              model: localModel,
-              maxTokens: 24,
-              timeoutMs: cfg.timeoutMs,
-            })("/proj")
-          : createModelRegistryClassifier(cfg)(registry, "/proj"),
+      makeClassifier: (cfg) => {
+        // Local (no-tool-call binary) models talk straight to an OpenAI-compatible
+        // endpoint; everything else goes through the pi model registry.
+        if (isLocalModelId(cfg.modelId)) {
+          return createLocalClassifier({
+            baseUrl: localBaseUrl,
+            model: localModel,
+            maxTokens: 24,
+            timeoutMs: cfg.timeoutMs,
+          })("/proj");
+        }
+        // Umans speaks `anthropic-messages` but the pi SDK trips a gateway 500;
+        // use the raw Anthropic client (identical semantics, reliable transport).
+        if (isUmansModelId(cfg.modelId)) {
+          const auth = umansAuths.get(cfg.modelId);
+          if (!auth) {
+            console.log(`[bench] could not resolve umans auth for ${cfg.modelId}, skipping`);
+            throw new Error(`umans auth unavailable for ${cfg.modelId}`);
+          }
+          return createAnthropicClassifier({
+            model: umansModelName(cfg.modelId),
+            auth,
+            maxTokens: 256,
+            timeoutMs: cfg.timeoutMs,
+          })("/proj");
+        }
+        return createModelRegistryClassifier(cfg)(registry, "/proj");
+      },
       log,
     });
     log(`cache: ${result.hits} hits, ${result.misses} misses`);

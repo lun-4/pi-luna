@@ -487,10 +487,11 @@ describe("runBenchmark", () => {
       outputDir, cachePath: path.join(dir, "cache.sqlite3"),
       resolveConfig: RESOLVE_CONFIG, makeClassifier,
     });
-    // The good model still classified every story; bad was skipped, not fatal.
+    // The good model still classified every story; the bad model's per-story
+    // failures are recorded as error rows, not fatal to the run.
     expect(goodCalls.length).toBe(STORIES.length);
     const md = await import("node:fs/promises").then((f) => f.readFile(path.join(outputDir, "RESULTS.md"), "utf8"));
-    expect(md).toContain("### bad — skipped");
+    expect(md).toContain("classify failures"); // per-story failures noted
     expect(md).toContain("good");
   });
 

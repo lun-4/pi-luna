@@ -59,6 +59,21 @@ export const classifierVerdictTool = {
   constrainedSampling: { type: "json_schema", strict: "require" } as const,
 };
 
+/**
+ * Anthropic-compatible variant of the verdict tool. Anthropic's Messages API has
+ * no JSON-schema *constrtrained sampling* — it exposes native function-calling
+ * with an `input_schema`. Here the `strict: "require"` flag is dropped so
+ * pi-ai's Anthropic completions path (which rejects `strict: "require"` when
+ * `supportsStrictTools` is false) falls back to plain forced tool-calling with
+ * its own schema coercion instead of throwing. The model (e.g. a gateway that
+ * speaks `anthropic-messages`) is asked to call the tool; approval is still
+ * parsed from the returned `{approved, reason}` arguments.
+ */
+export const classifierVerdictToolAnthropic = {
+  ...classifierVerdictTool,
+  constrainedSampling: undefined as undefined,
+};
+
 export const CLASSIFIER_ERROR = {
   modelNotFound: "classifier model not found in registry",
   noAuth: "classifier model has no configured auth",
@@ -99,6 +114,20 @@ export interface ModelRegistryClassifierConfig {
   timeoutMs: number;
   /** Optional provider-specific reasoning budget (used by reasoning models). */
   reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  /**
+   * Registry provider to look the model up under. Defaults to `"openrouter"`
+   * (the historical default, under which cross-cloud ids like
+   * `deepseek/deepseek-v4-flash-0731` are served). Set this to target a model
+   * that lives under a different provider (e.g. `umans`).
+   */
+  provider?: string;
+  /**
+   * True when the target provider speaks `anthropic-messages` (e.g. `umans`),
+   * which has no strict JSON-schema constrained sampling. Uses the
+   * Anthropic-compatible verdict tool (no `strict: "require"`) so forced
+   * tool-calling works instead of throwing.
+   */
+  anthropicCompatible?: boolean;
 }
 
 export interface ClassifiedRun {
@@ -301,15 +330,18 @@ export function parseVerdictToolCall(
 /**
  * Build a classifier client bound to the model registry + cwd at gate time.
  * The default model id is relative to the openrouter provider ("deepseek/…").
+ * Pass `cfg.provider` to look the model up under a different registry provider
+ * (e.g. `umans` for an Anthropic-compatible gateway provider).
  */
 export function createModelRegistryClassifier(
   cfg: ModelRegistryClassifierConfig,
 ) {
   return (modelRegistry: ModelRegistry, cwd: string): ClassifierClient => {
+    const provider = cfg.provider ?? "openrouter";
     const client: ClassifierClient = {
       classify: async (req, opts) => {
         void cwd;
-        const model = modelRegistry.find("openrouter", cfg.modelId);
+        const model = modelRegistry.find(provider, cfg.modelId);
         if (!model) throw new Error(CLASSIFIER_ERROR.modelNotFound);
         if (!modelRegistry.hasConfiguredAuth(model))
           throw new Error(
@@ -333,7 +365,7 @@ export function createModelRegistryClassifier(
             {
               systemPrompt: req.systemPrompt,
               messages: req.messages,
-              tools: [classifierVerdictTool],
+              tools: [cfg.anthropicCompatible ? classifierVerdictToolAnthropic : classifierVerdictTool],
             },
             {
               maxTokens: cfg.maxTokens,

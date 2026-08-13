@@ -239,6 +239,29 @@ function verdictResponse(args: Record<string, unknown>): AssistantMessage {
 const clientCfg = { modelId: "deepseek/deepseek-v4-flash-0731", maxTokens: 128, timeoutMs: 1000 };
 
 describe("createModelRegistryClassifier", () => {
+  it("looks the model up under cfg.provider when set (e.g. umans)", async () => {
+    const reg = mockRegistry({});
+    const client = createModelRegistryClassifier({
+      ...clientCfg,
+      modelId: "umans-deepseek-v4-flash-0731",
+      provider: "umans",
+    })(reg as never, "/proj");
+    const verdict = await client.classify(
+      { systemPrompt: "x", messages: [], targetCommand: "x" },
+      { signal: undefined },
+    );
+    expect(verdict.approved).toBe(true);
+    // find() must be called with the configured provider, not the openrouter default.
+    expect(reg.find).toHaveBeenCalledWith("umans", "umans-deepseek-v4-flash-0731");
+  });
+
+  it("defaults to the openrouter provider when provider is unset", async () => {
+    const reg = mockRegistry({});
+    const client = createModelRegistryClassifier(clientCfg)(reg as never, "/proj");
+    await client.classify({ systemPrompt: "x", messages: [], targetCommand: "x" }, {});
+    expect(reg.find).toHaveBeenCalledWith("openrouter", clientCfg.modelId);
+  });
+
   it("issues a single strict-schema tool with forced toolChoice and exact options (AC.6)", async () => {
     const reg = mockRegistry({});
     const client = createModelRegistryClassifier(clientCfg)(reg as never, "/proj");
