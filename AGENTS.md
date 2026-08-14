@@ -60,7 +60,7 @@ Notes:
   that produces the staged `corpus-synth/`, validated offline by
   `bench:classifier:synth` (`BENCH_CORPUS_DIR`); plus `kara/` — the converter
   (`benchmarks/classifier/kara/convert.mjs`) that turns the committed
-  `kara-synth-data/*.jsonl` into the gitignored `kara-corpus/` via
+  `kara-synth-data-v2/*.jsonl` into the gitignored `kara-corpus/` via
   `gen:kara-corpus` (benchmed with `BENCH_DIRECTORY`, results in
   `BENCH_OUTPUT_DIR`).
 - `scripts/` — manual smoke/probe scripts

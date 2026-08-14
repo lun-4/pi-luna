@@ -141,7 +141,8 @@ ratio, and the distinct-category count.
 ## Kara corpus
 
 A second corpus source: Atomic-Red-Team-style classification examples from
-`kara-synth-data/*.jsonl` (see `kara-synth-data/README.md` for the external
+`kara-synth-data-v2/augmented_training_examples.jsonl` (see
+`kara-synth-data-v2/README.md` for the external
 format) are converted into the same corpus schema by
 `benchmarks/classifier/kara/convert.mjs` — pure ESM, deterministic, zero deps.
 Each surviving row becomes one story:
@@ -193,9 +194,12 @@ npm run bench:classifier
 `BENCH_OUTPUT_DIR` (default `benchmarks/classifier`) steers `RESULTS.md` /
 `RESULTS.csv` so kara results never clobber the committed canonical files; a
 cheap generalization probe is `node benchmarks/classifier/kara/convert.mjs
---out /tmp/kara-eval --split eval --check` + the offline validator pointed at
-that dir (80 eval rows → 40 surviving stories). Verdicts cache on disk as usual
-(`BENCH_CACHE_PATH`), so reruns are near-free; `BENCH_MODELS` trims model count.
+--out /tmp/kara-eval --check` + the offline validator pointed at
+that dir. Verdicts cache on disk as usual
+(`BENCH_CACHE_PATH`), so reruns are near-free; `BENCH_MODELS` trims the model
+list (comma-separated ids/slugs). `OPENROUTER_ONLY=1` drops the local
+(llama.cpp `localhost/*`) and umans (`umans/*`) models from the default list,
+keeping only the openrouter catalogue.
 
 ## Workflow
 

@@ -317,7 +317,7 @@ describe.skipIf(!live)("live classifier benchmark", () => {
     };
     const stories = await loadStories();
     const prompts = await loadPrompts();
-    const models = (process.env.BENCH_MODELS ?? [
+    const rawModels = (process.env.BENCH_MODELS ?? [
       "openai/gpt-5.6-luna",
       "deepseek/deepseek-v4-flash-0731",
       "openai/gpt-oss-120b",
@@ -331,6 +331,16 @@ describe.skipIf(!live)("live classifier benchmark", () => {
       "umans/umans-deepseek-v4-flash-0731",
     ].join(","))
       .split(",").map((s) => s.trim()).filter(Boolean);
+    // OPENROUTER_ONLY drops the local (llama.cpp) + umans (gateway) models —
+    // they aren't worth benchmarking for most runs (no OPENROUTER_API_KEY is
+    // involved in their auth, and they're often unavailable/slow). Keeps the
+    // openrouter catalogue only.
+    const openrouterOnly = process.env.OPENROUTER_ONLY === "1";
+    const models =
+      (openrouterOnly
+        ? rawModels.filter((m) => !isLocalModelId(m) && !isUmansModelId(m))
+        : rawModels)
+        .filter(Boolean);
 
     // Local (non-openrouter) models route through the OpenAI-compatible HTTP
     // client instead of the pi model registry. Env vars let you point it at
